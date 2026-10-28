@@ -1,9 +1,12 @@
 """Who the user has been talking to on Slack lately, and about what.
 
 Read through the agent-slack CLI, which signs in with the Slack desktop app's session.
-One search takes 10-15 s, so this refreshes in the background every quarter hour and
-a dictation only ever reads the last result. Message text is kept in memory only; the
-terms drawn from it go the same way as the other context (context.py).
+One search takes 10-25 s, so a dictation never waits for it: it only reads the last
+result. Refreshes are rare and happen only while nobody is talking: once at start, then
+every few hours, or after half an hour if a dictation went into Slack since (new
+conversations are likely then). The child runs at background priority. Message text is
+kept in memory only; the terms drawn from it go the same way as the other context
+(context.py).
 """
 
 from __future__ import annotations
@@ -63,16 +66,29 @@ def digest(results: list[dict], me: str = "") -> tuple[str, Counter]:
 
 
 class SlackSource:
-    def __init__(self, days: int = 2, refresh_s: float = 900, cli: str | None = None):
+    def __init__(self, days: int = 2, refresh_s: float = 4 * 3600, cli: str | None = None,
+                 busy=lambda: False, soon_s: float = 1800):
         self.days = days
         self.refresh_s = refresh_s
+        self.soon_s = soon_s
         self.cli = cli or find_cli()
+        self.busy = busy
         self.me = ""
         self.version = 0
         self.text = ""
         self.people: Counter = Counter()
+        self.fetched = 0.0
+        self.poked = False
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+
+    def poke(self) -> None:
+        """The user just dictated into Slack: refresh sooner than usual."""
+        self.poked = True
+
+    def due(self, now: float) -> bool:
+        age = now - self.fetched
+        return age >= self.refresh_s or (self.poked and age >= self.soon_s)
 
     def snapshot(self) -> tuple[int, str, Counter]:
         with self._lock:
@@ -87,11 +103,13 @@ class SlackSource:
     def _loop(self, delay_s: float) -> None:
         time.sleep(delay_s)  # let the models load first
         while True:
-            try:
-                self.refresh()
-            except Exception as e:  # offline, signed out, CLI changed: keep the last result
-                log.info("slack context skipped: %s", e)
-            time.sleep(self.refresh_s)
+            if self.due(time.time()) and not self.busy():
+                self.fetched, self.poked = time.time(), False  # a failure also waits a full interval
+                try:
+                    self.refresh()
+                except Exception as e:  # offline, signed out, CLI changed: keep the last result
+                    log.info("slack context skipped: %s", e)
+            time.sleep(60)
 
     def _run(self, *args: str) -> dict:
         env = dict(os.environ)
@@ -99,7 +117,9 @@ class SlackSource:
         # A company TLS proxy's root is in the macOS keychain; a shell would point
         # NODE_EXTRA_CA_CERTS at it, but the app does not start from a shell.
         env.setdefault("NODE_USE_SYSTEM_CA", "1")
-        out = subprocess.run([self.cli, *args], capture_output=True, text=True, timeout=90, env=env)
+        # taskpolicy -b: background QoS, so it never competes with a dictation for CPU.
+        out = subprocess.run(["/usr/sbin/taskpolicy", "-b", self.cli, *args], capture_output=True,
+                             text=True, timeout=120, env=env)
         if out.returncode != 0:
             raise RuntimeError((out.stderr or out.stdout).strip()[:200])
         return json.loads(out.stdout)

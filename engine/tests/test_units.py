@@ -278,6 +278,16 @@ class ContextTest(unittest.TestCase):
         self.assertNotIn("Mallory", terms, "one-off words in messages are not names")
         self.assertNotIn("Zheng", terms)
 
+    def test_slack_refreshes_rarely(self):
+        from slack import SlackSource
+        s = SlackSource(cli="/bin/true", refresh_s=4 * 3600, soon_s=1800)
+        s.fetched = 1000.0
+        self.assertFalse(s.due(1000 + 3600))
+        s.poke()
+        self.assertTrue(s.due(1000 + 3600), "a dictation into Slack brings it forward")
+        self.assertFalse(s.due(1000 + 600), "but not within half an hour")
+        self.assertTrue(SlackSource(cli="/bin/true").due(time.time()), "never fetched")
+
     def test_notes_carry_only_hints(self):
         from pipeline import Pipeline
         p = Pipeline.__new__(Pipeline)
@@ -354,6 +364,48 @@ class GuardTest(unittest.TestCase):
         out = "用 Claude Code 跑一下"
         self.assertGreater(novelty(raw, out), 0)
         self.assertEqual(novelty(raw, out, allowed={"claude", "code"}), 0)
+
+
+class AgentLearningTest(unittest.TestCase):
+    def test_fixes_made_before_sending(self):
+        from agent_learning import corrections, sent_span
+        said = "你有这个问题已经搞完了吗？需要 Hoppen 做"
+        sent = "先看这个。NEO 这个问题已经搞完了吗？需要 hoffman 做\n还有别的吗"
+        span = sent_span(said, sent)
+        self.assertTrue(span.startswith("NEO"), "words are not cut in half")
+        self.assertEqual(corrections(said, span), [("你有", "NEO"), ("Hoppen", "hoffman")])
+        self.assertEqual(corrections(said, said), [])
+        self.assertEqual(corrections("这个直接搞吧", "这个就快做了吧"), [], "rewording is not a fix")
+        self.assertIsNone(sent_span(said, "完全不同的一句话"), "a different message teaches nothing")
+
+    def test_learns_once_per_dictation(self):
+        import datetime as dt
+        from agent_learning import learn
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "history"))
+        os.makedirs(os.path.join(d, "projects", "p"))
+        now = dt.datetime.now().astimezone()
+        t = now - dt.timedelta(hours=1)
+        with open(os.path.join(d, "history", t.date().isoformat() + ".jsonl"), "w") as f:
+            f.write(json.dumps({"ts": t.replace(tzinfo=None).isoformat(timespec="seconds"), "app": "com.stablyai.orca",
+                                "app_name": "Orca", "text": "让 Hoppen 看一下这个 PR"}) + "\n")
+            f.write(json.dumps({"ts": t.replace(tzinfo=None).isoformat(timespec="seconds"), "app": "com.tinyspeck.slackmacgap",
+                                "app_name": "Slack", "text": "让 Hoppen 看一下"}) + "\n")
+        sent = (t + dt.timedelta(minutes=1)).astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        with open(os.path.join(d, "projects", "p", "s.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "timestamp": sent,
+                                "message": {"content": "让 hoffman 看一下这个 PR"}}) + "\n")
+        globs = [os.path.join(d, "projects", "*", "*.jsonl")]
+        self.assertEqual(learn(d, globs, spelling={"hoffman": "Hoffman"}), [("Hoppen", "Hoffman")])
+        self.assertEqual(learn(d, globs), [], "each dictation is looked at once")
+
+    def test_common_words_stay_hints(self):
+        from lexicon import merge_learned
+        data = merge_learned({"terms": []}, [{"from": "break", "to": "Blake", "count": 3},
+                                             {"from": "过去", "to": "merge", "count": 2},
+                                             {"from": "Hoppen", "to": "Hoffman", "count": 2}])
+        self.assertEqual([r["from"] for r in data["replacements"]], [["Hoppen"]])
+        self.assertEqual(len(data["learned_hints"]), 3)
 
 
 if __name__ == "__main__":

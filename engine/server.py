@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import load_config  # noqa: E402
+import agent_learning  # noqa: E402
 from lexicon import Lexicon, learned_path, record_learned  # noqa: E402
 import maintenance  # noqa: E402
 from pipeline import Pipeline  # noqa: E402
@@ -88,6 +90,7 @@ class Server:
         self.last_gpu = time.time()
         self._finishing: set[asyncio.Task] = set()
         self._maintained: dt.date | None = None
+        self._agent_learned = 0.0
 
     # ---------- GPU queue ----------
 
@@ -138,7 +141,8 @@ class Server:
             _limit_memory()
             lex = Lexicon.load(self.lexicon_path, self.cfg["hotwords_max"])
             self.pipeline = Pipeline(self.cfg, lex, status=lambda s: self._set_status(False, s),
-                                     history_dir=os.path.join(self.support, "history"))
+                                     history_dir=os.path.join(self.support, "history"),
+                                     busy=lambda: bool(self.sessions) or self.pending > 0)
             self.pipeline.warmup()
             self._set_status(True, "就绪")
             log.info("models ready in %.1fs (asr=%s llm=%s terms=%d)", time.time() - t,
@@ -164,6 +168,10 @@ class Server:
                 except Exception:
                     log.exception("daily maintenance failed")
                 continue
+            if self.cfg.get("agent_learning", True) and time.time() - self._agent_learned > 3600:
+                self._agent_learned = time.time()
+                threading.Thread(target=self._learn_from_agents, name="agent-learning", daemon=True).start()
+                continue
             # Keep the models resident: on this machine macOS pages them out after a few
             # idle minutes, and the next dictation then waited ~3 s for them.
             if time.time() - self.last_gpu > self.cfg.get("keep_warm_s", 45):
@@ -179,6 +187,20 @@ class Server:
             except Exception:
                 log.exception("lexicon reload failed; keeping the previous one")
                 p.lexicon.mtime = os.path.getmtime(self.lexicon_path)  # don't retry every 3 s
+
+    def _learn_from_agents(self) -> None:
+        """Fixes made to dictations in a terminal before sending them to Claude Code."""
+        try:
+            out = subprocess.run(["/usr/sbin/taskpolicy", "-b", sys.executable, agent_learning.__file__,
+                                  "--support", self.support], capture_output=True, text=True, timeout=600)
+            if out.returncode != 0:
+                raise RuntimeError(out.stderr.strip()[-300:])
+            pairs = [tuple(p) for p in json.loads(out.stdout or "[]")]
+            if pairs:
+                items = record_learned(learned_path(self.lexicon_path), pairs)
+                log.info("learned %d correction(s) from agent sessions; %d known", len(pairs), len(items))
+        except Exception:
+            log.exception("learning from agent sessions failed")
 
     def _set_status(self, ready: bool, text: str) -> None:
         self.ready, self.status_text = ready, text
@@ -226,6 +248,8 @@ class Server:
             if self.pipeline:
                 self.sessions[sid].terms_future = self.ctx.submit(self.pipeline.session_terms,
                                                                   self.sessions[sid].context)
+                if self.pipeline.slack and "slack" in msg.get("app", "").lower():
+                    self.pipeline.slack.poke()
             if self.pipeline and self.ready and time.time() - self.last_gpu > 30:
                 self.submit(self._touch)
         elif kind == "audio" and sid in self.sessions:

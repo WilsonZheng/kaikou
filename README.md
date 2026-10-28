@@ -27,9 +27,9 @@ fn 按住不放、或者和别的键一起按（比如 fn+F1 调亮度），都�
 
 ## 越用越准
 
-- **自我学习**：识别错了，直接在输入框里改掉就行。Kaikou 会在粘贴后观察那段文字，发现你把某个词改掉了，就记下来：改过一次，下次作为提示交给整理模型，并把正确的词放到识别热词最前面；同样的修改出现两次，就变成自动替换。学到的内容在面板的“词库”里，学错了可以删掉。只能观察能读取文字的输入框（大部分原生 App、Slack 等），终端里读不到。
+- **自我学习**：识别错了，直接在输入框里改掉就行。Kaikou 会在粘贴后观察那段文字，发现你把某个词改掉了，就记下来：改过一次，下次作为提示交给整理模型，并把正确的词放到识别热词最前面；同样的修改出现两次，就变成自动替换。学到的内容在面板的“词库”里，学错了可以删掉。只能观察能读取文字的输入框（大部分原生 App、Slack 等），终端里读不到。在 Orca 这类终端里说给 Claude Code 的话，Kaikou 每小时会把你实际发出去的消息（在 Claude Code 的对话记录里）和它当时输入的文字对比一次：你在发送前改掉的词（比如把 Hoppen 改成 Hoffman），也会照样学会。普通英文单词和两个字的中文词只当提示，不会变成自动替换，免得误改正常的话。不想要这个功能，在 `config.json` 里写 `"agent_learning": false`。
 - **结合上下文**：开始录音时会读当前窗口的标题和光标前的一小段文字，帮助整理模型判断人名、仓库名怎么写（只参考，不写进结果）。
-- **知道你在聊谁**：在 Orca 这样的终端里读不到窗口文字，所以 Kaikou 还会看最近 30 分钟里有更新的 Claude Code 对话记录、你最近两天在 Slack 上跟谁聊过什么，以及你最近三天说过的话，挑出里面的人名、产品名和仓库名（比如正在和 Hoffman 讨论 ezyVet site），在识别时优先往这些词上靠。整理时，转写里出现读音很像其中某个名字的词（比如 Hopon、Hoppen），会提示整理模型多半是 Hoffman。人名的大小写也会统一（HOFFMAN、ezyvet 写成 Hoffman、ezyVet）。Slack 通过 [agent-slack](https://github.com/stablyai/agent-slack) 读取（它用 Slack 桌面版的登录状态），每 15 分钟在后台刷新一次，消息只留在内存里；没装 agent-slack 就自动跳过。不想让它读 Claude Code 记录或 Slack，在 `config.json` 里写 `"agent_context": false` 或 `"slack_context": false`。
+- **知道你在聊谁**：在 Orca 这样的终端里读不到窗口文字，所以 Kaikou 还会看最近 30 分钟里有更新的 Claude Code 对话记录、你最近两天在 Slack 上跟谁聊过什么，以及你最近三天说过的话，挑出里面的人名、产品名和仓库名（比如正在和 Hoffman 讨论 ezyVet site），在识别时优先往这些词上靠。整理时，转写里出现读音很像其中某个名字的词（比如 Hopon、Hoppen），会提示整理模型多半是 Hoffman。人名的大小写也会统一（HOFFMAN、ezyvet 写成 Hoffman、ezyVet）。Slack 通过 [agent-slack](https://github.com/stablyai/agent-slack) 读取（它用 Slack 桌面版的登录状态），平时每 4 小时在后台刷新一次，你在 Slack 里用过语音输入后 30 分钟内会提前刷新一次；只在你没说话时刷新，并且以后台低优先级运行，不会拖慢识别。消息只留在内存里；没装 agent-slack 就自动跳过。不想让它读 Claude Code 记录或 Slack，在 `config.json` 里写 `"agent_context": false` 或 `"slack_context": false`。
 
 ## 安装
 

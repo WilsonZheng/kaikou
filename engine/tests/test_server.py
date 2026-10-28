@@ -16,7 +16,9 @@ import server  # noqa: E402
 
 
 class FakePipeline:
-    def __init__(self, cfg, lexicon, status=lambda s: None, history_dir=""):
+    slack = None
+
+    def __init__(self, cfg, lexicon, status=lambda s: None, history_dir="", busy=lambda: False):
         self.recognized = []
 
     def session_terms(self, window_context):

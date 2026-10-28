@@ -195,9 +195,18 @@ their own (the guard accepts a context word only as a spelling fix of something 
 turns off context terms entirely.
 
 The one network read is Slack: if the `agent-slack` CLI is installed, the engine runs two
-searches (`from:me` and `to:me`, last two days) every 15 minutes in the background and
-keeps the message text and the names of the people in it in memory only. A search takes
-10-25 s, so a dictation never waits for it. `"slack_context": false` turns it off.
+searches (`from:me` and `to:me`, last two days) in the background and keeps the message
+text and the names of the people in it in memory only. A search takes 10-25 s, so a
+dictation never waits for it: it refreshes at start, then every 4 hours, or after 30
+minutes if a dictation went into Slack since, only while nobody is talking, at background
+QoS (`taskpolicy -b`). `"slack_context": false` turns it off.
+
+Learning from terminal fixes (`agent_learning.py`) reads the user turns of local Claude
+Code transcripts once an hour, in a background-priority child process, and compares each
+terminal dictation with the message sent within 20 minutes of it. Only the corrected word
+pairs are kept (in `learned.json`, like the app's own learning). A pair whose source is a
+common English word or a Chinese word of one or two characters never becomes a rule.
+`"agent_learning": false` turns it off.
 
 ## Hotkey
 

@@ -23,6 +23,8 @@ DEFAULTS = {
     "agent_context_minutes": 30,
     "slack_context": True,        # ...and who you talked to on Slack (needs agent-slack)
     "slack_context_days": 2,
+    "slack_refresh_hours": 4,     # sooner (30 min) after a dictation into Slack
+    "agent_learning": True,       # learn from fixes made before sending to Claude Code
 }
 
 

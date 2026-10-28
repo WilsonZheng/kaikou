@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -126,8 +127,16 @@ def load_learned(path: str) -> list[dict]:
         return []
 
 
+_LEARN_LOCK = threading.Lock()  # the app's reports and the agent-session learner both write
+
+
 def record_learned(path: str, pairs: list[tuple[str, str]]) -> list[dict]:
     """Counts each (heard, meant) pair the user fixed by hand."""
+    with _LEARN_LOCK:
+        return _record_learned(path, pairs)
+
+
+def _record_learned(path: str, pairs: list[tuple[str, str]]) -> list[dict]:
     items = load_learned(path)
     index = {(c["from"], c["to"]): c for c in items}
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -161,7 +170,10 @@ def merge_learned(data: dict, learned: list[dict]) -> dict:
     hints = []
     fronts = []
     for c in sorted(learned, key=lambda c: -c.get("count", 1)):
-        if c.get("count", 1) >= 2:
+        # An English word ("break" fixed to "Blake") or a two-character Chinese word
+        # ("过去" fixed to "merge") stays a hint: as a rule it would rewrite every real
+        # use of the word.
+        if c.get("count", 1) >= 2 and not _is_word(c["from"]):
             rules.append({"from": [c["from"]], "to": c["to"], "confidence": "high"})
         hints.append([c["from"], c["to"]])
         if re.search(r"[A-Za-z]", c["to"]) and len(c["to"]) <= 40:
@@ -170,6 +182,13 @@ def merge_learned(data: dict, learned: list[dict]) -> dict:
     hot = data.get("hotwords") or [t["term"] if isinstance(t, dict) else t for t in data.get("terms", [])]
     data["hotwords"] = list(dict.fromkeys(fronts + list(hot)))
     return data
+
+
+def _is_word(text: str) -> bool:
+    from context import is_common
+    if re.fullmatch(r"[\u3400-\u9fff]{1,2}", text):
+        return True
+    return bool(re.fullmatch(r"[A-Za-z]+", text)) and is_common(text)
 
 
 @functools.lru_cache(maxsize=4096)

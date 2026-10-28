@@ -172,13 +172,15 @@ def session_terms(session) -> list[str]:
 
 
 class Pipeline:
-    def __init__(self, cfg: dict, lexicon: Lexicon, status=lambda s: None, history_dir: str = ""):
+    def __init__(self, cfg: dict, lexicon: Lexicon, status=lambda s: None, history_dir: str = "",
+                 busy=lambda: False):
         self.cfg = cfg
         self.lexicon = lexicon
         self.history_dir = history_dir
         self.slack = None
         if cfg.get("context_terms", True) and cfg.get("slack_context", True):
-            self.slack = SlackSource(days=cfg.get("slack_context_days", 2))
+            self.slack = SlackSource(days=cfg.get("slack_context_days", 2), busy=busy,
+                                     refresh_s=cfg.get("slack_refresh_hours", 4) * 3600)
             self.slack.start()
         self.context = self._context_source(lexicon)
         status("加载识别模型…")
