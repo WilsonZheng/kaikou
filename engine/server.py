@@ -60,6 +60,7 @@ class Session:
         self.chunked = 0
         self.chunk_timings: dict = {}
         self.context = ""                       # text near the cursor, for terms only
+        self.terms_future: cf.Future | None = None  # names likely in this dictation
         self.ended = False
         self.cancelled = False
 
@@ -74,6 +75,8 @@ class Server:
         self.lexicon_path = os.path.join(support, "lexicon.json")
         self.cfg = load_config(support)
         self.gpu = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
+        # Reading recent agent sessions for names is file work: keep it off the GPU queue.
+        self.ctx = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="context")
         self.pending = 0                       # GPU jobs queued or running
         self.pending_lock = threading.Lock()
         self.pipeline: Pipeline | None = None
@@ -134,7 +137,8 @@ class Server:
         try:
             _limit_memory()
             lex = Lexicon.load(self.lexicon_path, self.cfg["hotwords_max"])
-            self.pipeline = Pipeline(self.cfg, lex, status=lambda s: self._set_status(False, s))
+            self.pipeline = Pipeline(self.cfg, lex, status=lambda s: self._set_status(False, s),
+                                     history_dir=os.path.join(self.support, "history"))
             self.pipeline.warmup()
             self._set_status(True, "就绪")
             log.info("models ready in %.1fs (asr=%s llm=%s terms=%d)", time.time() - t,
@@ -219,6 +223,9 @@ class Server:
         elif kind == "begin" and sid:
             self.sessions[sid] = Session(sid, msg.get("app", ""), msg.get("app_name", ""), self.cfg["segment"], writer)
             self.sessions[sid].context = str(msg.get("context", ""))[:1000]
+            if self.pipeline:
+                self.sessions[sid].terms_future = self.ctx.submit(self.pipeline.session_terms,
+                                                                  self.sessions[sid].context)
             if self.pipeline and self.ready and time.time() - self.last_gpu > 30:
                 self.submit(self._touch)
         elif kind == "audio" and sid in self.sessions:

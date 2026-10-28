@@ -16,8 +16,11 @@ import server  # noqa: E402
 
 
 class FakePipeline:
-    def __init__(self, cfg, lexicon, status=lambda s: None):
+    def __init__(self, cfg, lexicon, status=lambda s: None, history_dir=""):
         self.recognized = []
+
+    def session_terms(self, window_context):
+        return ["Hoffman"] if "Hoffman" in window_context else []
 
     def warmup(self):
         pass
@@ -36,8 +39,10 @@ class FakePipeline:
         pass
 
     def finalize(self, session):
+        from pipeline import session_terms
         parts = [f.result()[0] for _, _, f in session.segments]
-        return {"text": " ".join(parts + [f"tail({session.n})"]), "raw": ",".join(session.edited), "timings": {}}
+        return {"text": " ".join(parts + [f"tail({session.n})"]), "raw": ",".join(session.edited),
+                "timings": {"terms": session_terms(session)}}
 
 
 class DeadlockTest(unittest.TestCase):
@@ -97,7 +102,7 @@ class ServerProtocolTest(unittest.TestCase):
             t = np.arange(18 * 16000) / 16000
             speech = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
             audio = np.concatenate([speech, np.zeros(16000, np.float32), speech[: 3 * 16000]])
-            self.send(writer, {"type": "begin", "id": "a", "app": "x", "app_name": "X"})
+            self.send(writer, {"type": "begin", "id": "a", "app": "x", "app_name": "X", "context": "@Hoffman"})
             for i in range(0, len(audio), 1600):
                 pcm = (audio[i:i + 1600] * 32767).astype("<i2").tobytes()
                 self.send(writer, {"type": "audio", "id": "a", "pcm16": base64.b64encode(pcm).decode()})
@@ -107,6 +112,7 @@ class ServerProtocolTest(unittest.TestCase):
             self.assertTrue(res["text"].startswith("seg1 tail("), res["text"])
             self.assertIn("after_release", res["timings"])
             self.assertEqual(res["raw"], "chunk", "background edit ran")
+            self.assertEqual(res["timings"]["terms"], ["Hoffman"], "context terms reach the pipeline")
 
             # Cancelled sessions produce nothing.
             self.send(writer, {"type": "begin", "id": "b"})

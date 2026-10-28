@@ -12,6 +12,7 @@ import mlx.core as mx
 import numpy as np
 
 from asr import Recognizer
+from context import ContextSource, is_name_like, sound_alike
 from guard import check, novelty, tokens
 from lexicon import Lexicon, lexicon_mtime
 from polish import Polisher
@@ -38,6 +39,10 @@ _KEEP_DOUBLE = {"看看", "试试", "想想", "谢谢", "刚刚", "常常", "慢
 _SENTENCE_END = re.compile(r"[。！？!?]|\.(?=\s)")
 _CLAUSE_END = re.compile(r"[，,；;]")
 _LIST_ITEM = re.compile(r"^(\d+)\.\s")
+# Context terms per dictation: more makes the recognizer likelier to read them back on
+# silence. The post-editor never sees the list itself (shown one, it started adding
+# names nobody said); it only gets hints for words that sound like one of them.
+ASR_TERMS = 25
 
 
 def split_complete(text: str, clause_after: int = 80) -> tuple[str, str, bool]:
@@ -136,6 +141,16 @@ def clean_fillers(text: str) -> str:
     return re.sub(r"^[，,、\s]+", "", text)
 
 
+_CJK_THEN_LATIN = re.compile(r"([㐀-鿿])([A-Za-z0-9])")
+_LATIN_THEN_CJK = re.compile(r"([A-Za-z0-9])([㐀-鿿])")
+
+
+def space_mixed(text: str) -> str:
+    """One space between Chinese and English words or digits ("Ben现在" -> "Ben 现在"),
+    the house style the post-editor usually applies but sometimes misses."""
+    return _LATIN_THEN_CJK.sub(r"\1 \2", _CJK_THEN_LATIN.sub(r"\1 \2", text))
+
+
 def collapse_acronyms(text: str) -> str:
     """Chinese mode spells acronyms out ("P.R.", "C I C D"); join them back."""
     text = _DOTTED.sub(lambda m: m.group(1).replace(".", ""), text)
@@ -143,10 +158,24 @@ def collapse_acronyms(text: str) -> str:
     return re.sub(r"\bCICD\b", "CI/CD", text)
 
 
+def session_terms(session) -> list[str]:
+    """Names likely in this dictation, gathered when the recording began (context.py).
+    Never holds up recognition: a slow or failed lookup just means no extra terms."""
+    fut = getattr(session, "terms_future", None)
+    if fut is None:
+        return []
+    try:
+        return fut.result(timeout=1.0)
+    except Exception:
+        return []
+
+
 class Pipeline:
-    def __init__(self, cfg: dict, lexicon: Lexicon, status=lambda s: None):
+    def __init__(self, cfg: dict, lexicon: Lexicon, status=lambda s: None, history_dir: str = ""):
         self.cfg = cfg
         self.lexicon = lexicon
+        self.history_dir = history_dir
+        self.context = self._context_source(lexicon)
         status("加载识别模型…")
         self.asr = Recognizer(cfg["asr_model"])
         self.asr.set_hotwords(lexicon.hotwords)
@@ -157,6 +186,21 @@ class Pipeline:
             self.polisher = Polisher(cfg["llm_model"], self._system_prompt(),
                                      extra_prompts={"minimal": self._system_prompt(minimal=True)})
 
+    def _context_source(self, lexicon: Lexicon) -> ContextSource | None:
+        if not self.cfg.get("context_terms", True):
+            return None
+        return ContextSource(lexicon.terms, self.history_dir,
+                             agent_globs=None if self.cfg.get("agent_context", True) else [],
+                             agent_minutes=self.cfg.get("agent_context_minutes", 30))
+
+    def session_terms(self, window_context: str) -> list[str]:
+        """Runs off the GPU thread when a recording begins."""
+        t = time.perf_counter()
+        source = self.context
+        terms = source.gather(window_context) if source else []
+        log.info("%d context term(s) in %.2fs", len(terms), time.perf_counter() - t)
+        return terms
+
     def _system_prompt(self, minimal: bool = False) -> str:
         return build_system_prompt(self.lexicon.terms, self.lexicon.examples, self.lexicon.misheard, minimal=minimal)
 
@@ -166,6 +210,7 @@ class Pipeline:
         full = lexicon.base_mtime != self.lexicon.base_mtime
         old_base = self.lexicon.base_mtime
         self.lexicon = lexicon
+        self.context = self._context_source(lexicon)
         self.allowed = {t for term in lexicon.terms for t in tokens(term)}
         self.allowed |= {t for _, dst in lexicon.learned_hints for t in tokens(dst)}
         self.asr.set_hotwords(lexicon.hotwords)
@@ -213,18 +258,21 @@ class Pipeline:
         # they are still talking. The tail after release stays greedy.
         beams = self.cfg.get("background_beams", 1)
         released = lambda: getattr(session, "ended", False)
-        text, secs = self.asr.transcribe(audio, beams=beams, should_stop=released)
+        terms = session_terms(session)[:ASR_TERMS]
+        text, secs = self.asr.transcribe(audio, beams=beams, should_stop=released, terms=terms)
         if session.lang == "Chinese" and text and not _CJK.search(text):
-            text, more = self.asr.transcribe(audio, language="Chinese", beams=beams, should_stop=released)
+            text, more = self.asr.transcribe(audio, language="Chinese", beams=beams, should_stop=released,
+                                             terms=terms)
             secs += more
         if session.lang is None and text.strip():
             session.lang = session_language(text)
         return text, secs
 
     def edit(self, raw: str, app_name: str, timings: dict | None = None, should_stop=None,
-             context: str = "") -> str | None:
+             context: str = "", terms: list[str] | None = None) -> str | None:
         """Post-edits one piece of transcript, with the guard and the minimal-edit retry.
-        Returns None if `should_stop` interrupted it."""
+        `terms` are names likely in this dictation. Returns None if `should_stop`
+        interrupted it."""
         fixed = collapse_acronyms(self.lexicon.apply(raw))
         if not self.polisher or not fixed.strip():
             return fixed
@@ -232,11 +280,13 @@ class Pipeline:
         # Words around the cursor may name the people and terms being talked about;
         # they are allowed in the output without counting as invented content.
         context = sanitize_context(context)
-        allowed = self.allowed | context_terms(context, fixed)
-        if self.lexicon.learned_hints:
-            learned = "；".join(f"{a}→{b}" for a, b in self.lexicon.learned_hints)
-            context = f"{context}\n用户以前手动纠正过（上下文说得通时照此改）：{learned}".strip()
-        r = self.polisher.polish(user_message(fixed, app_name, context), source=fixed, should_stop=should_stop)
+        terms = terms or []
+        allowed = self.allowed | context_terms(context + "\n" + ", ".join(terms), fixed)
+        notes = self._notes(fixed, terms)
+        for line in notes:  # hinted spellings are fixes, not invented content
+            allowed |= {t for t in tokens(line.split("：", 1)[-1])}
+        msg = user_message(fixed, app_name, context, notes)
+        r = self.polisher.polish(msg, source=fixed, should_stop=should_stop)
         if r.stopped:
             return None
         t["polish_prefill"] = round(t.get("polish_prefill", 0) + r.prefill_s, 3)
@@ -248,13 +298,27 @@ class Pipeline:
             log.warning("post-edit rejected (%s): %d -> %d chars, novelty %.2f; retrying minimal edit",
                         why, len(fixed), len(r.text), novelty(fixed, r.text, allowed))
             t["polish_rejected"] = t.get("polish_rejected", 0) + 1
-            r = self.polisher.polish(user_message(fixed, app_name, context), source=fixed, prompt="minimal")
+            r = self.polisher.polish(msg, source=fixed, prompt="minimal")
             why = check(fixed, r.text, allowed) if r.complete else "incomplete"
             if why:
                 t["minimal_rejected"] = t.get("minimal_rejected", 0) + 1
-                return clean_fillers(fixed)
-            return clean_fillers(self.lexicon.apply(r.text))
-        return clean_fillers(self.lexicon.apply(r.text))
+                return space_mixed(clean_fillers(fixed))
+            return space_mixed(clean_fillers(self.lexicon.apply(r.text)))
+        return space_mixed(clean_fillers(self.lexicon.apply(r.text)))
+
+    def _notes(self, text: str, terms: list[str]) -> list[str]:
+        """Per-request <context> line: the likely mishearings that actually occur in this
+        transcript (known ones, learned ones, and words that sound like one of the names
+        in play or in the vocabulary). Empty when there are none."""
+        notes = []
+        hints = self.lexicon.hints_for(text)
+        names = terms + [t for t in self.lexicon.terms if is_name_like(t)]
+        for pair in sound_alike(text, names, self.allowed):
+            if pair[0] not in {a for a, _ in hints}:
+                hints.append(pair)
+        if hints:
+            notes.append("转写里可能听错的词（上下文说得通时才改）：" + "；".join(f"{a}→{b}" for a, b in hints[:8]))
+        return notes
 
     def advance_chunks(self, session, should_stop=None) -> None:
         """Edits the finished part of the recording while the user keeps talking: every
@@ -276,7 +340,7 @@ class Pipeline:
             complete, session.pending, cont = split_complete(pending)
             if len(complete) >= 15:
                 edited = self.edit(complete, session.app_name, session.chunk_timings, should_stop,
-                                   getattr(session, "context", ""))
+                                   getattr(session, "context", ""), session_terms(session))
                 if edited is None:  # the key was released: finalize takes over from here
                     session.chunked -= 1
                     session.pending = pending_before
@@ -303,21 +367,23 @@ class Pipeline:
             start = s_end
         tail_audio = audio[start:]
         tail, tail_time = ("", 0.0)
+        terms = session_terms(session)
         if not session.segments or has_speech(tail_audio, session.segmenter.levels()):
-            tail, tail_time = self.asr.transcribe(tail_audio, language=session.lang)
+            tail, tail_time = self.asr.transcribe(tail_audio, language=session.lang, terms=terms[:ASR_TERMS])
         raw = join_texts([f.result()[0] for _, _, f in session.segments] + [tail])
         timings = {"segments": len(session.segments), "asr_bg": round(seg_time, 3), "asr_tail": round(tail_time, 3)}
 
         if self.cfg.get("chunked", True) and session.segments:
             self.advance_chunks(session)  # anything the background did not get to
             rest = join_texts([session.pending, tail]) if session.pending else tail
-            last = self.edit(rest, session.app_name, timings, context=getattr(session, "context", "")) if rest.strip() else ""
+            last = (self.edit(rest, session.app_name, timings, context=getattr(session, "context", ""), terms=terms)
+                    if rest.strip() else "")
             text = join_chunks(session.edited + [last], session.continues + [False])
             timings["chunks"] = len(session.edited) + 1
             for k, v in session.chunk_timings.items():
                 timings["bg_" + k] = v
         else:
-            text = self.edit(raw, session.app_name, timings, context=getattr(session, "context", ""))
+            text = self.edit(raw, session.app_name, timings, context=getattr(session, "context", ""), terms=terms)
         timings["total_engine"] = round(time.perf_counter() - t0, 3)
         return {"text": text, "raw": raw, "timings": timings}
 

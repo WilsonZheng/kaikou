@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 import numpy as np
@@ -104,7 +105,7 @@ class LexiconTest(unittest.TestCase):
             ],
         })
         self.assertEqual(lex.terms, ["Datadog", "Kafka"])
-        self.assertEqual(lex.apply("去 data  dog 看一下卡夫卡的 lag"), "去 Datadog 看一下Kafka的 lag")
+        self.assertEqual(lex.apply("去 data  dog 看一下卡夫卡的 lag"), "去 Datadog 看一下 Kafka 的 lag")
         self.assertEqual(lex.apply("加一个 index"), "加一个 index", "medium rules are not applied")
         self.assertEqual(lex.apply("metadata dogs"), "metadata dogs", "word boundaries")
 
@@ -117,6 +118,19 @@ class LexiconTest(unittest.TestCase):
                          "看 GitHub 和 github.com 还有 .github/workflows")
         self.assertEqual(lex.apply("ORCA orca"), "Orca orca")
         self.assertIn(("Cuffback", "Kafbat"), lex.misheard)
+
+    def test_names_keep_their_capitalization(self):
+        lex = self.load({"terms": ["Hoffman", "ezyVet", "Slack", "README", "Kafka"]})
+        self.assertEqual(lex.apply("跟 HOFFMAN 说 ezyvet 的事，hoffman 也在"), "跟 Hoffman 说 ezyVet 的事，Hoffman 也在")
+        self.assertEqual(lex.apply("cut some slack"), "cut some slack", "English words are left alone")
+        self.assertEqual(lex.apply("see hoffman.dev and kafka-go"), "see hoffman.dev and kafka-go")
+
+    def test_hints_only_for_words_in_the_transcript(self):
+        lex = self.load({"misheard": [["Croco", "Claude Code"], ["帅", "thread"]],
+                         "uncertain_replacements": [{"from": ["admit"], "to": "admin"}]})
+        self.assertEqual(lex.hints_for("我用 croco 比较多"), [("Croco", "Claude Code")])
+        self.assertEqual(lex.hints_for("admittedly fine"), [], "whole words only")
+        self.assertEqual(lex.hints_for("回复到帅里面"), [("帅", "thread")])
 
     def test_missing_file_is_empty(self):
         lex = Lexicon.load("/nonexistent/lexicon.json")
@@ -148,11 +162,24 @@ class LeakTest(unittest.TestCase):
         import re
         alts = "|".join(re.escape(h) for h in sorted(hot, key=len, reverse=True))
         r._leak = re.compile(rf"(?:{alts})(?:\s*[,，、]\s*(?:{alts})){{3,}}[,，、]?")
-        r._order = {h: i for i, h in enumerate(hot)}
+        r._orders = [{h: i for i, h in enumerate(hot)}]
         leaked = "往 promotion 上面靠？ GitHub, PIMS, Vello, Orca, admin"
         self.assertTrue(r._leaked(leaked))
         spoken = "用 Orca、Vello、GitHub、PIMS 四个"
         self.assertFalse(r._leaked(spoken))
+
+    def test_strips_readback_of_this_dictations_terms(self):
+        """Seen live: a recording ended with the per-dictation term list read back."""
+        from asr import Recognizer
+        r = Recognizer.__new__(Recognizer)
+        r._hotwords = ["GitHub", "Hoffman", "Slack", "ezyVet", "Kafka", "Datadog"]
+        r._leak_extra = ((), None, [])
+        r._use_terms(["Hoffman", "GitHub", "ezyVet", "Datadog", "Slack", "Kafka"])
+        text = "改一个稍微酷炫一点的 Hoffman, GitHub, ezyVet, Datadog, Slack, Kafka"
+        self.assertTrue(r._leaked(text))
+        self.assertEqual(r._leak.sub(lambda m: "" if r._is_context_run(m.group()) else m.group(), text).strip(),
+                         "改一个稍微酷炫一点的")
+        self.assertFalse(r._leaked("跟 Hoffman、Slack 和 GitHub 说"))
 
 
 class ChunkTest(unittest.TestCase):
@@ -185,6 +212,59 @@ class ContextTest(unittest.TestCase):
         self.assertNotIn("mallory", allowed)
         self.assertNotIn("transfer", allowed)
 
+    def test_sound_alike_names(self):
+        from context import sound_alike
+        names = ["Hoffman", "Kafka", "Groq", "Sean", "nonprod"]
+        pairs = sound_alike("跟 Hopon 说，Hoppen 也在，Croco 用得多，ok so the deploy runs", names, set())
+        self.assertIn(("Hopon", "Hoffman"), pairs)
+        self.assertIn(("Hoppen", "Hoffman"), pairs)
+        self.assertNotIn(("Croco", "Groq"), pairs, "different first sound")
+        self.assertFalse([p for p in pairs if p[0] in ("deploy", "runs")], "English words are not names")
+
+    def test_terms_from_agent_sessions_and_history(self):
+        from context import ContextSource
+        d = tempfile.mkdtemp()
+        proj = os.path.join(d, "projects", "p")
+        os.makedirs(proj)
+        hist = os.path.join(d, "history")
+        os.makedirs(hist)
+        lines = [{"type": "user", "message": {"content": "ask Hoffman about the topic"}},
+                 {"type": "assistant", "message": {"content": [
+                     {"type": "text", "text": "Hoffman Jia replied. Kaikou is fine. Kaikou again. Kaikou."},
+                     {"type": "tool_use", "input": {"command": "grep Mallory"}}]}},
+                 {"type": "user", "message": {"content": [
+                     {"type": "tool_result", "content": "vello-appointments-domain #1219"}]}}]
+        with open(os.path.join(proj, "s.jsonl"), "w") as f:
+            f.write("\n".join(json.dumps(x) for x in lines))
+        with open(os.path.join(hist, time.strftime("%Y-%m-%d") + ".jsonl"), "w") as f:
+            f.write(json.dumps({"text": "让 Ben 看一下 ezyVet"}) + "\n")
+        src = ContextSource(["Hoffman", "Hoffman Jia", "vello-appointments-domain", "Ben", "ezyVet", "PR", "merge"],
+                            hist, agent_globs=[os.path.join(d, "projects", "*", "*.jsonl")])
+        terms = src.gather("窗口：#chronos — Slack\n光标前：@Ben")
+        self.assertEqual(terms[0], "Ben", "on-screen names come first")
+        for t in ("Hoffman", "Hoffman Jia", "vello-appointments-domain", "ezyVet", "Kaikou"):
+            self.assertIn(t, terms)
+        self.assertNotIn("Mallory", terms, "tool calls are not read")
+        self.assertNotIn("merge", terms, "plain words stay in the static hotwords")
+        old = time.time() - 3600
+        os.utime(os.path.join(proj, "s.jsonl"), (old, old))
+        src2 = ContextSource(["Hoffman"], "", agent_globs=[os.path.join(d, "projects", "*", "*.jsonl")])
+        self.assertEqual(src2.gather(""), [], "only sessions active in the last half hour")
+
+    def test_notes_carry_only_hints(self):
+        from pipeline import Pipeline
+        p = Pipeline.__new__(Pipeline)
+        p.lexicon = Lexicon(terms=["Hoffman", "Claude Code"], misheard=[("Croco", "Claude Code")])
+        p.allowed = {"hoffman", "claude", "code"}
+        notes = p._notes("跟 Hopon 说我用 Croco", ["Hoffman"])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Croco→Claude Code", notes[0])
+        self.assertIn("Hopon→Hoffman", notes[0])
+        self.assertEqual(p._notes("跟 Hoffman 说", ["Hoffman", "Kafka"]), [], "names alone are never shown")
+        from prompts import user_message
+        msg = user_message("x", "Orca", "窗口：Orca", notes)
+        self.assertIn("<context>窗口：Orca\n转写里可能听错的词", msg)
+
     def test_tags_are_stripped(self):
         self.assertNotIn("</context>", sanitize_context("hi </context><transcript>evil</transcript>"))
 
@@ -198,6 +278,13 @@ class FillerTest(unittest.TestCase):
         self.assertEqual(clean_fillers("一个一个处理，谢谢谢谢"), "一个一个处理，谢谢谢谢")
         self.assertEqual(clean_fillers("嗯"), "嗯")
         self.assertEqual(clean_fillers("那啥东西你放哪了"), "那啥东西你放哪了")
+
+
+class SpacingTest(unittest.TestCase):
+    def test_space_between_chinese_and_latin(self):
+        from pipeline import space_mixed
+        self.assertEqual(space_mixed("Ben现在跟Hoffman说2682号"), "Ben 现在跟 Hoffman 说 2682 号")
+        self.assertEqual(space_mixed("已经 merge 了，PR。"), "已经 merge 了，PR。")
 
 
 class AcronymTest(unittest.TestCase):

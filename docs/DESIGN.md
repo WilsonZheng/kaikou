@@ -90,6 +90,26 @@ with ~17–27 GB of swap in use, so the engine budget is ~8 GB.
    still talking; once Chinese has been heard, later segments are forced to Chinese
    mode (which keeps English words in English). Without the lock, a segment that starts
    with an English word is sometimes translated wholesale into English.
+5. **Per-dictation context terms** (`engine/context.py`) — 78% of dictation goes into
+   Orca, a terminal, where the accessibility API reads nothing (the window context
+   was 7 characters, "窗口：Orca", every time). When a recording begins, a side thread
+   collects the names in play: vocabulary terms and recurring non-English capitalized
+   words from the Claude Code sessions written to in the last 30 minutes (conversation
+   text, plus vocabulary hits in tool output), from the window context, and from the
+   last three days of dictation. Up to 25 go into the recognizer's prompt right after
+   the cached hotwords (a few dozen tokens per segment, no rebuild). Replaying 16 past
+   recordings: "Hopon" came back as Hoffman, "咖啡" as Kafka, "Easy Vet 赛" as ezyVet
+   site, with no change in latency. The read-back filter covers this list too (seen
+   once: a recording ending in silence came back with the list appended).
+6. **Targeted hints for the post-editor** — only for words actually in the transcript:
+   known mishearings from the lexicon, learned fixes, and Latin words that are neither
+   English (system dictionary) nor vocabulary but sound like a name in play
+   (consonant skeleton: "Hopon"/"Hoppen" → Hoffman). The post-editor never sees the
+   term list itself: shown 15 names, it began inserting ones nobody said ("appointment
+   那个 Kafka topic") and editing less.
+7. **Name capitalization** — vocabulary names that are not English words keep their
+   spelling whatever case the recognizer used ("HOFFMAN", "ezyvet" → Hoffman, ezyVet);
+   "slack" or "patch" are never touched. Replacements inside Chinese get spaces.
 
 ## Latency levers
 
@@ -167,6 +187,12 @@ edit score 55% and up.
 Everything stays on the machine. Personal data — the vocabulary (colleague names,
 internal service names), example pairs, history and audio — lives in
 `~/Library/Application Support/Kaikou/`, never in this public repository.
+
+Context terms read the tail of local Claude Code transcripts (`~/.claude*/projects`);
+only vocabulary-like words are kept, in memory, and they never reach the output on
+their own (the guard accepts a context word only as a spelling fix of something said).
+`"agent_context": false` in `config.json` turns this source off, `"context_terms": false`
+turns off context terms entirely.
 
 ## Hotkey
 

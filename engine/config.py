@@ -18,6 +18,9 @@ DEFAULTS = {
     "keep_warm_s": 45,
     "audio_keep_days": 30,        # recorded audio; the text history is kept
     "learned_stale_days": 60,     # one-off corrections that never came back
+    "context_terms": True,        # bias each dictation toward names in recent use
+    "agent_context": True,        # ...including Claude Code sessions active lately
+    "agent_context_minutes": 30,
 }
 
 

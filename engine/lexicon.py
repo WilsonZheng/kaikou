@@ -3,6 +3,7 @@ and deterministic replacement rules applied after both."""
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -56,6 +57,7 @@ class Lexicon:
                 else:
                     misheard.append((src, to))
         misheard += [tuple(m) for m in data.get("misheard", [])]
+        reps += _case_rules(terms, {to for _, to in reps})
         examples = [(e["raw"], e["text"]) for e in data.get("examples", []) if e.get("raw") and e.get("text")]
         return cls(terms=terms, hotwords=hot[:max_hotwords], replacements=reps, examples=examples,
                    misheard=misheard, learned_hints=learned_hints, mtime=lexicon_mtime(path),
@@ -63,8 +65,44 @@ class Lexicon:
 
     def apply(self, text: str) -> str:
         for pat, to in self.replacements:
-            text = pat.sub(to, text)
+            text = pat.sub(lambda m, to=to: _spaced(m, to), text)
         return text
+
+    def hints_for(self, text: str) -> list[tuple[str, str]]:
+        """Known mishearings and learned fixes that actually occur in `text`, so the
+        post-editor sees the few that matter right next to the transcript."""
+        out: list[tuple[str, str]] = []
+        for src, dst in list(self.misheard) + list(self.learned_hints):
+            if (src, dst) not in out and src != dst and _pattern(src).search(text):
+                out.append((src, dst))
+        return out
+
+
+_CJK_CHAR = re.compile(r"[㐀-鿿]")
+
+
+def _spaced(m: re.Match, to: str) -> str:
+    """A Latin replacement inside Chinese gets the usual space on each side
+    ("跟浩本说" -> "跟 Hoffman 说")."""
+    s, a, b = m.string, m.start(), m.end()
+    pre = " " if to[:1].isascii() and to[:1].isalnum() and a > 0 and _CJK_CHAR.match(s[a - 1]) else ""
+    post = " " if to[-1:].isascii() and to[-1:].isalnum() and b < len(s) and _CJK_CHAR.match(s[b]) else ""
+    return pre + to + post
+
+
+def _case_rules(terms: list[str], covered: set[str]) -> list[tuple[re.Pattern, str]]:
+    """Names and products keep their own capitalization ("HOFFMAN", "ezyvet", "Github"
+    -> "Hoffman", "ezyVet", "GitHub"). Only single words that are not English words, so
+    "slack" or "patch" are never touched."""
+    from context import is_common
+    rules = []
+    for t in terms:
+        if (t in covered or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{3,}", t) or t.islower()
+                or t.isupper() or is_common(t)):
+            continue
+        rules.append((re.compile(r"(?<![A-Za-z0-9./_@-])" + re.escape(t)
+                                 + r"(?![A-Za-z0-9_/-]|\.[A-Za-z0-9])", re.I), t))
+    return rules
 
 
 # ---------- corrections learned from the user's own edits ----------
@@ -134,6 +172,7 @@ def merge_learned(data: dict, learned: list[dict]) -> dict:
     return data
 
 
+@functools.lru_cache(maxsize=4096)
 def _pattern(src: str, case_sensitive: bool = False) -> re.Pattern:
     """Latin phrases match whole words (case-insensitively unless told otherwise) and
     never inside a domain, path or identifier ("github.com", ".github/"); CJK matches

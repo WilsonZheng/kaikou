@@ -75,7 +75,9 @@ def build_system_prompt(vocabulary: list[str], examples: list[tuple[str, str]] |
     return "\n\n".join(parts)
 
 
-def user_message(raw: str, app_name: str = "", context: str = "") -> str:
+def user_message(raw: str, app_name: str = "", context: str = "", notes: list[str] | None = None) -> str:
+    """`notes` are extra <context> lines built per request (likely mishearings)."""
     head = f"当前应用：{app_name}\n" if app_name else ""
-    ctx = f"<context>{context[-400:]}</context>\n" if context.strip() else ""
+    body = "\n".join(x for x in [context[-400:].strip(), *(notes or [])] if x and x.strip())
+    ctx = f"<context>{body}</context>\n" if body else ""
     return f"{head}{ctx}<transcript>{raw}</transcript>"

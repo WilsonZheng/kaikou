@@ -2,6 +2,8 @@
 
 The vocabulary goes into the system prompt, which comes before the audio, so its KV
 cache is computed once and reused; each request only prefills its own audio tokens.
+Terms for this one dictation (names from the current conversation) follow the cached
+part, so they cost a few dozen tokens per segment and never a rebuild.
 The audio embeddings are spliced in with one concatenate instead of mlx-audio's
 per-position Python loop.
 """
@@ -30,16 +32,19 @@ class Recognizer:
         self._suffix_ids = self.tok.encode(_SUFFIX, add_special_tokens=False)
         self.context = ""
         self._leak = None
-        self._order: dict[str, int] = {}
+        self._orders: list[dict[str, int]] = []  # each list the model was given, in order
+        self._hotwords: list[str] = []
+        self._leak_extra: tuple = ((), None, [])
         self._prefix_cache = None
         self.set_hotwords([])
 
     def set_hotwords(self, hotwords: list[str]) -> None:
         self.context = ", ".join(hotwords)
+        self._hotwords = list(hotwords)
         # On (near) silence the model sometimes reads its context back: "GitHub, PIMS, Vello, …".
-        alts = "|".join(re.escape(h) for h in sorted(hotwords, key=len, reverse=True))
-        self._leak = re.compile(rf"(?:{alts})(?:\s*[,，、]\s*(?:{alts})){{3,}}[,，、]?") if hotwords else None
-        self._order = {h: i for i, h in enumerate(hotwords)}
+        self._leak = _leak_pattern(hotwords)
+        self._orders = [{h: i for i, h in enumerate(hotwords)}]
+        self._leak_extra = ((), self._leak, self._orders)
         # Cached part ends right after the hotwords so per-request context can follow.
         prefix = f"<|im_start|>system\n{self.context}\n" if self.context else "<|im_start|>system\n"
         ids = mx.array(self.tok.encode(prefix, add_special_tokens=False))[None]
@@ -60,17 +65,33 @@ class Recognizer:
 
     beams = 1  # >1 switches decoding to beam search
 
+    def _use_terms(self, terms: list[str]) -> None:
+        """Leak detection covers this dictation's terms too; each list keeps its own
+        order, since a read-back repeats one list in sequence."""
+        key = tuple(terms)
+        if key != self._leak_extra[0]:
+            orders = [{h: i for i, h in enumerate(self._hotwords)}]
+            if terms:
+                orders.append({t: i for i, t in enumerate(terms)})
+            self._leak_extra = (key, _leak_pattern(list(dict.fromkeys(self._hotwords + list(terms)))), orders)
+        self._leak, self._orders = self._leak_extra[1], self._leak_extra[2]
+
     def transcribe(self, audio: np.ndarray, language: str | None = None, beams: int | None = None,
-                   should_stop=None) -> tuple[str, float]:
+                   should_stop=None, terms: list[str] | None = None) -> tuple[str, float]:
         """`language` (e.g. "Chinese") skips auto-detection. Chinese mode keeps English
         words in English, so it is the right lock for mixed speech: without it, a
-        segment that starts with an English word can come back translated to English."""
+        segment that starts with an English word can come back translated to English.
+        `terms` are names and words likely in this dictation (see context.py)."""
         if len(audio) < 1_600:  # under 0.1 s
             return "", 0.0
         t = time.perf_counter()
         feats, mask, n_audio = self.model._preprocess_audio(audio.astype(np.float32))
         audio_emb = self.model.get_audio_features(feats, mask)
-        head_emb = self.model.model.embed_tokens(mx.array(self._head_ids))
+        self._use_terms(terms or [])
+        head_ids = self._head_ids
+        if terms:
+            head_ids = self.tok.encode(", ".join(terms) + "\n", add_special_tokens=False) + head_ids
+        head_emb = self.model.model.embed_tokens(mx.array(head_ids))
         suffix_ids = self._suffix_ids + (self.tok.encode(f"language {language}<asr_text>", add_special_tokens=False)
                                          if language else [])
         text_emb = self.model.model.embed_tokens(mx.array(suffix_ids))
@@ -85,13 +106,15 @@ class Recognizer:
         return text.strip(), time.perf_counter() - t
 
     def _is_context_run(self, run: str) -> bool:
-        """A leaked context run repeats the hotword list in its own order; a real spoken
-        list ("GitHub、Vello 和 Orca") does not."""
+        """A leaked context run repeats one of the lists it was given (the hotwords or
+        this dictation's terms) in that list's order; a real spoken list ("GitHub、Vello
+        和 Orca") does not."""
         items = [x.strip() for x in re.split(r"[,，、]", run) if x.strip()]
-        idx = [self._order.get(x) for x in items]
-        if None in idx:
-            return False
-        return sum(1 for a, b in zip(idx, idx[1:]) if b == a + 1) >= 3
+        for order in self._orders:
+            idx = [order.get(x) for x in items]
+            if None not in idx and sum(1 for a, b in zip(idx, idx[1:]) if b == a + 1) >= 3:
+                return True
+        return False
 
     def _leaked(self, text: str) -> bool:
         return bool(self._leak) and any(self._is_context_run(m.group()) for m in self._leak.finditer(text))
@@ -178,6 +201,13 @@ class Recognizer:
             if s and s[-1] not in self.eos:
                 finished.append((norm(scores[i], len(s)), s))
         return max(finished, key=lambda f: f[0])[1] if finished else []
+
+
+def _leak_pattern(words: list[str]) -> re.Pattern | None:
+    if not words:
+        return None
+    alts = "|".join(re.escape(h) for h in sorted(words, key=len, reverse=True))
+    return re.compile(rf"(?:{alts})(?:\s*[,，、]\s*(?:{alts})){{3,}}[,，、]?")
 
 
 def _looping(out: list[int], min_k: int = 4, max_k: int = 40) -> bool:
