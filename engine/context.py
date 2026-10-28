@@ -6,7 +6,8 @@ sources fill the gap:
 
 - the Claude Code sessions written to in the last half hour: their conversation names
   the people, repos and PRs being talked about right now;
-- the user's own dictations from the last few days.
+- the user's own dictations from the last few days;
+- who the user has been talking to on Slack in the last two days (slack.py).
 
 Only vocabulary-like words are taken from them. They bias the recognizer and the
 post-editor toward the right spelling and never go into the text by themselves.
@@ -25,6 +26,9 @@ from collections import Counter
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_./][A-Za-z0-9]+)*")
 _NAME = re.compile(r"(?<![A-Za-z0-9_./-])[A-Z][a-z]{2,14}(?![A-Za-z0-9_/-])")
 _COMMON: set[str] | None = None
+_CALENDAR = {"January", "February", "March", "April", "May", "June", "July", "August", "September",
+             "October", "November", "December", "Monday", "Tuesday", "Wednesday", "Thursday",
+             "Friday", "Saturday", "Sunday"}  # capitalized in the dictionary, so not "common"
 
 
 def common_words() -> set[str]:
@@ -80,7 +84,7 @@ def new_names(text: str, known: set[str], min_count: int = 3) -> Counter:
     vocabulary does not have yet ("Alice", "Kaikou")."""
     counts = Counter(m.group() for m in _NAME.finditer(text))
     return Counter({w: c for w, c in counts.items()
-                    if c >= min_count and not is_common(w) and w.lower() not in known})
+                    if c >= min_count and not is_common(w) and w.lower() not in known and w not in _CALENDAR})
 
 
 # ---------- sources ----------
@@ -131,7 +135,7 @@ class ContextSource:
 
     def __init__(self, terms: list[str], history_dir: str = "", agent_globs: list[str] | None = None,
                  agent_minutes: float = 30, history_days: int = 3, max_terms: int = 40,
-                 tail_bytes: int = 400_000):
+                 tail_bytes: int = 400_000, slack=None):
         self.index = TermIndex(terms)
         self.known = {t.lower() for t in terms}
         self.history_dir = history_dir
@@ -144,6 +148,8 @@ class ContextSource:
         self._agent_cache: dict[str, tuple[float, Counter]] = {}
         self._history_cache: dict[str, tuple[float, Counter]] = {}
         self._listed: tuple[float, list[str]] = (0.0, [])
+        self.slack = slack
+        self._slack_cache: tuple[int, Counter] = (0, Counter())
 
     @staticmethod
     def _cached(cache: dict, path: str, compute) -> Counter:
@@ -236,9 +242,24 @@ class ContextSource:
                                   self._history_file)
         return total
 
+    def slack_terms(self) -> Counter:
+        """Vocabulary and names from recent Slack messages, plus the first and last
+        names of the people in them ("Hoffman", "Buechi")."""
+        if self.slack is None:
+            return Counter()
+        version, text, people = self.slack.snapshot()
+        if version != self._slack_cache[0]:
+            hits = self.index.find(text) + new_names(text, self.known)
+            for full, n in people.items():
+                for part in full.split():
+                    if re.fullmatch(r"[A-Za-z][A-Za-z'-]{2,}", part):
+                        hits[part] += n
+            self._slack_cache = (version, hits)
+        return self._slack_cache[1]
+
     def gather(self, window_context: str = "", now: float | None = None) -> list[str]:
-        """Most relevant first: what is on screen, then the live agent sessions, then
-        recent dictations."""
+        """Most relevant first: what is on screen, then the live agent sessions and
+        Slack, then recent dictations."""
         score: Counter = Counter()
         for term, n in self.index.find(window_context).items():
             score[term] += 100 + n
@@ -246,6 +267,8 @@ class ContextSource:
             score[term] += 50 + n
         for term, n in self.agent_terms(now).items():
             score[term] += 10 + min(n, 30)
+        for term, n in self.slack_terms().items():
+            score[term] += 8 + min(n, 20)
         for term, n in self.history_terms(now).items():
             score[term] += 5 + min(n, 10)
         return [t for t, _ in score.most_common(self.max_terms)]

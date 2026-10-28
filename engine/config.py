@@ -21,6 +21,8 @@ DEFAULTS = {
     "context_terms": True,        # bias each dictation toward names in recent use
     "agent_context": True,        # ...including Claude Code sessions active lately
     "agent_context_minutes": 30,
+    "slack_context": True,        # ...and who you talked to on Slack (needs agent-slack)
+    "slack_context_days": 2,
 }
 
 

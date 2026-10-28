@@ -13,6 +13,7 @@ import numpy as np
 
 from asr import Recognizer
 from context import ContextSource, is_name_like, sound_alike
+from slack import SlackSource
 from guard import check, novelty, tokens
 from lexicon import Lexicon, lexicon_mtime
 from polish import Polisher
@@ -175,6 +176,10 @@ class Pipeline:
         self.cfg = cfg
         self.lexicon = lexicon
         self.history_dir = history_dir
+        self.slack = None
+        if cfg.get("context_terms", True) and cfg.get("slack_context", True):
+            self.slack = SlackSource(days=cfg.get("slack_context_days", 2))
+            self.slack.start()
         self.context = self._context_source(lexicon)
         status("加载识别模型…")
         self.asr = Recognizer(cfg["asr_model"])
@@ -191,7 +196,7 @@ class Pipeline:
             return None
         return ContextSource(lexicon.terms, self.history_dir,
                              agent_globs=None if self.cfg.get("agent_context", True) else [],
-                             agent_minutes=self.cfg.get("agent_context_minutes", 30))
+                             agent_minutes=self.cfg.get("agent_context_minutes", 30), slack=self.slack)
 
     def session_terms(self, window_context: str) -> list[str]:
         """Runs off the GPU thread when a recording begins."""

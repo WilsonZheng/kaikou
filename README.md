@@ -1,6 +1,6 @@
 # Kaikou（开口）
 
-开口就能打字。一个只给自己用的 macOS 语音输入工具：按一下左 Control + Shift 开始说话，说完再按一下，整理好的文字直接出现在光标处。全部在本机运行，不花钱，不联网。
+开口就能打字。一个只给自己用的 macOS 语音输入工具：按一下左 Control + Shift 开始说话，说完再按一下，整理好的文字直接出现在光标处。全部在本机运行，不花钱；声音和文字都不会离开你的电脑（唯一的联网是用 agent-slack 读你自己的 Slack，见下文）。
 
 对标 Typeless，只做一件事：中英混说的语音转文字，并且像 Typeless 一样把口语整理成通顺的文字（去口头禅、合并改口、长段落分段或整理成编号列表）。
 
@@ -29,7 +29,7 @@ fn 按住不放、或者和别的键一起按（比如 fn+F1 调亮度），都�
 
 - **自我学习**：识别错了，直接在输入框里改掉就行。Kaikou 会在粘贴后观察那段文字，发现你把某个词改掉了，就记下来：改过一次，下次作为提示交给整理模型，并把正确的词放到识别热词最前面；同样的修改出现两次，就变成自动替换。学到的内容在面板的“词库”里，学错了可以删掉。只能观察能读取文字的输入框（大部分原生 App、Slack 等），终端里读不到。
 - **结合上下文**：开始录音时会读当前窗口的标题和光标前的一小段文字，帮助整理模型判断人名、仓库名怎么写（只参考，不写进结果）。
-- **知道你在聊谁**：在 Orca 这样的终端里读不到窗口文字，所以 Kaikou 还会看最近 30 分钟里有更新的 Claude Code 对话记录和你最近三天说过的话，挑出里面的人名、产品名和仓库名（比如正在和 Hoffman 讨论 ezyVet site），在识别时优先往这些词上靠。整理时，转写里出现读音很像其中某个名字的词（比如 Hopon、Hoppen），会提示整理模型多半是 Hoffman。人名的大小写也会统一（HOFFMAN、ezyvet 写成 Hoffman、ezyVet）。全部在本机完成；不想让它读 Claude Code 记录，在 `config.json` 里写 `"agent_context": false`。
+- **知道你在聊谁**：在 Orca 这样的终端里读不到窗口文字，所以 Kaikou 还会看最近 30 分钟里有更新的 Claude Code 对话记录、你最近两天在 Slack 上跟谁聊过什么，以及你最近三天说过的话，挑出里面的人名、产品名和仓库名（比如正在和 Hoffman 讨论 ezyVet site），在识别时优先往这些词上靠。整理时，转写里出现读音很像其中某个名字的词（比如 Hopon、Hoppen），会提示整理模型多半是 Hoffman。人名的大小写也会统一（HOFFMAN、ezyvet 写成 Hoffman、ezyVet）。Slack 通过 [agent-slack](https://github.com/stablyai/agent-slack) 读取（它用 Slack 桌面版的登录状态），每 15 分钟在后台刷新一次，消息只留在内存里；没装 agent-slack 就自动跳过。不想让它读 Claude Code 记录或 Slack，在 `config.json` 里写 `"agent_context": false` 或 `"slack_context": false`。
 
 ## 安装
 

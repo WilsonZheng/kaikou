@@ -184,7 +184,7 @@ edit score 55% and up.
 
 ## Privacy
 
-Everything stays on the machine. Personal data — the vocabulary (colleague names,
+Audio and text stay on the machine. Personal data — the vocabulary (colleague names,
 internal service names), example pairs, history and audio — lives in
 `~/Library/Application Support/Kaikou/`, never in this public repository.
 
@@ -193,6 +193,11 @@ only vocabulary-like words are kept, in memory, and they never reach the output 
 their own (the guard accepts a context word only as a spelling fix of something said).
 `"agent_context": false` in `config.json` turns this source off, `"context_terms": false`
 turns off context terms entirely.
+
+The one network read is Slack: if the `agent-slack` CLI is installed, the engine runs two
+searches (`from:me` and `to:me`, last two days) every 15 minutes in the background and
+keeps the message text and the names of the people in it in memory only. A search takes
+10-25 s, so a dictation never waits for it. `"slack_context": false` turns it off.
 
 ## Hotkey
 

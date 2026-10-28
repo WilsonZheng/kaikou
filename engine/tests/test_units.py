@@ -251,6 +251,33 @@ class ContextTest(unittest.TestCase):
         src2 = ContextSource(["Hoffman"], "", agent_globs=[os.path.join(d, "projects", "*", "*.jsonl")])
         self.assertEqual(src2.gather(""), [], "only sessions active in the last half hour")
 
+    def test_terms_from_slack(self):
+        from context import ContextSource
+        from slack import digest
+        users = {"U0000001": {"real_name": "Wilson Zheng"}, "U0000002": {"real_name": "Hoffman Jia"},
+                 "U0000003": {"real_name": "Ben Buechi"}, "U0000009": {"real_name": "GitHub", "is_bot": True}}
+        results = [
+            {"messages": [{"author": {"user_id": "U0000001"}, "content": "Agree with <@U0000003>, see https://x.io/ezyVet"},
+                          {"author": {"user_id": "U0000001"}, "content": "就弄成 utc，Kafka 那边不用改"}],
+             "referenced_users": users},
+            {"messages": [{"author": {"user_id": "U0000002"}, "content": "ezyVet site 的 topic 我看了"},
+                          {"author": {"user_id": "U0000009", "bot_id": "B1"}, "content": "Mallory requested review"}],
+             "referenced_users": users}]
+        text, people = digest(results, me="U0000001")
+        self.assertEqual(people, {"Hoffman Jia": 1, "Ben Buechi": 1}, "the user and bots are left out")
+        self.assertIn("Ben Buechi", text, "mentions read as names")
+        self.assertNotIn("x.io", text)
+
+        class Fake:
+            def snapshot(self):
+                return 1, text, people
+        src = ContextSource(["Kafka", "ezyVet", "ezyVet site", "PR"], "", agent_globs=[], slack=Fake())
+        terms = src.gather("")
+        for t in ("Hoffman", "Jia", "Ben", "Buechi", "Kafka", "ezyVet site"):
+            self.assertIn(t, terms)
+        self.assertNotIn("Mallory", terms, "one-off words in messages are not names")
+        self.assertNotIn("Zheng", terms)
+
     def test_notes_carry_only_hints(self):
         from pipeline import Pipeline
         p = Pipeline.__new__(Pipeline)
