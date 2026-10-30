@@ -14,10 +14,10 @@ import numpy as np
 from asr import Recognizer
 from context import ContextSource, is_name_like, sound_alike
 from slack import SlackSource
-from guard import check, novelty, tokens
+from guard import CORRECTION, check, novelty, tokens
 from lexicon import Lexicon, lexicon_mtime
 from polish import Polisher
-from prompts import build_system_prompt, user_message
+from prompts import build_system_prompt, bullets, user_message
 from segmenter import has_speech, join_texts, session_language
 
 log = logging.getLogger("kaikou")
@@ -31,7 +31,7 @@ _FILLER = re.compile(r"[呃嗯额]+[，,、]?\s*|啊{2,}[，,、]?\s*")
 _FILLER_PHRASE = re.compile(r"(?:呃|嗯)?那啥[，,、]\s*")
 # Stutters on single function characters ("又又", "我我"); real reduplication
 # (看看, 试试, 刚刚) uses other characters and is left alone.
-_STUTTER = re.compile(r"([我你他她它这那的了去给就是在把有要又都也还再会能])\1+")
+_STUTTER = re.compile(r"(?<!不)(?!的的确)([我你他她它这那的了去给就是在把有要又都也还再会能])\1+")  # not 不了了之, 的的确确
 # Repeated words: "整个整个", "什么什么", "thread thread", "appointment appointment".
 # "一个一个" (one by one) is kept.
 _REPEAT_CJK = re.compile(r"((?!一个)[\u3400-\u9fff]{2,4})(?:[，,]?\s*\1)+")
@@ -40,6 +40,28 @@ _KEEP_DOUBLE = {"看看", "试试", "想想", "谢谢", "刚刚", "常常", "慢
 _SENTENCE_END = re.compile(r"[。！？!?]|\.(?=\s)")
 _CLAUSE_END = re.compile(r"[，,；;]")
 _LIST_ITEM = re.compile(r"^(\d+)\.\s")
+_BULLET = re.compile(r"^\s*- ")
+_RESTATE = re.compile(r"就是说|换句话说|也就是说|我是想说|我想说的是|再说一遍|重新来")
+_FUNCTION_CHARS = set("的了是我你他她它这那就在有和也都还要会能把给去说一个们么什吧呢啊嘛")
+
+
+def may_restate(text: str) -> bool:
+    """Signs the speaker took something back or said it twice: a correction phrase, a
+    restating phrase, or the same three content characters twice. Only then does the
+    request carry the reminder (it costs ~0.2 s of prefill), about a quarter of them."""
+    if CORRECTION.search(text) or _RESTATE.search(text):
+        return True
+    seen = set()
+    for i in range(len(text) - 2):
+        g = text[i:i + 3]
+        if _CJK.fullmatch(g[0]) and _CJK.fullmatch(g[1]) and _CJK.fullmatch(g[2]) \
+                and sum(c in _FUNCTION_CHARS for c in g) <= 1:
+            if g in seen:
+                return True
+            seen.add(g)
+    return False
+
+
 # Context terms per dictation: more makes the recognizer likelier to read them back on
 # silence. The post-editor never sees the list itself (shown one, it started adding
 # names nobody said); it only gets hints for words that sound like one of them.
@@ -87,8 +109,9 @@ def join_chunks(chunks: list[str], continues: list[bool] | None = None) -> str:
         lines = chunk.split("\n")
         first = _LIST_ITEM.match(lines[0])
         continuing = last_num > 0 and first is not None and first.group(1) == "1"
+        bulleted = bool(out) and bool(_BULLET.match(out[-1] or "")) and bool(_BULLET.match(lines[0]))
         if out:
-            out.append("" if not continuing else None)
+            out.append("" if not (continuing or bulleted) else None)
         for line in lines:
             m = _LIST_ITEM.match(line)
             if m and continuing:
@@ -106,6 +129,9 @@ def join_chunks(chunks: list[str], continues: list[bool] | None = None) -> str:
     return "\n".join(l for l in out if l is not None)
 
 
+# The post-editor sometimes copies the request's first line ("当前应用：Orca") into
+# its answer; nobody dictates that line, so it always goes.
+_ECHO = re.compile(r"^\s*当前应用[：:][^\n]*\n+")
 _TAG = re.compile(r"</?\s*(context|transcript|alt)\s*>", re.I)
 
 
@@ -156,6 +182,7 @@ def collapse_acronyms(text: str) -> str:
     """Chinese mode spells acronyms out ("P.R.", "C I C D"); join them back."""
     text = _DOTTED.sub(lambda m: m.group(1).replace(".", ""), text)
     text = _SPACED.sub(lambda m: m.group(1).replace(" ", ""), text)
+    text = re.sub(r"(?<![A-Za-z])Q\s?([一二三四])", lambda m: f"Q{'一二三四'.index(m.group(1)) + 1}", text)  # "Q 三" -> Q3
     return re.sub(r"\bCICD\b", "CI/CD", text)
 
 
@@ -292,10 +319,11 @@ class Pipeline:
         notes = self._notes(fixed, terms)
         for line in notes:  # hinted spellings are fixes, not invented content
             allowed |= {t for t in tokens(line.split("：", 1)[-1])}
-        msg = user_message(fixed, app_name, context, notes)
+        msg = user_message(fixed, app_name, context, notes, remind=may_restate(fixed))
         r = self.polisher.polish(msg, source=fixed, should_stop=should_stop)
         if r.stopped:
             return None
+        r.text = _ECHO.sub("", r.text)
         t["polish_prefill"] = round(t.get("polish_prefill", 0) + r.prefill_s, 3)
         t["polish_gen"] = round(t.get("polish_gen", 0) + r.gen_s, 3)
         t["polish_tokens"] = t.get("polish_tokens", 0) + r.tokens
@@ -305,13 +333,15 @@ class Pipeline:
             log.warning("post-edit rejected (%s): %d -> %d chars, novelty %.2f; retrying minimal edit",
                         why, len(fixed), len(r.text), novelty(fixed, r.text, allowed))
             t["polish_rejected"] = t.get("polish_rejected", 0) + 1
-            r = self.polisher.polish(msg, source=fixed, prompt="minimal")
+            r = self.polisher.polish(user_message(fixed, app_name, context, notes),
+                                     source=fixed, prompt="minimal")
+            r.text = _ECHO.sub("", r.text)
             why = check(fixed, r.text, allowed) if r.complete else "incomplete"
             if why:
                 t["minimal_rejected"] = t.get("minimal_rejected", 0) + 1
                 return space_mixed(clean_fillers(fixed))
-            return space_mixed(clean_fillers(self.lexicon.apply(r.text)))
-        return space_mixed(clean_fillers(self.lexicon.apply(r.text)))
+            return bullets(space_mixed(clean_fillers(self.lexicon.apply(r.text))))
+        return bullets(space_mixed(clean_fillers(self.lexicon.apply(r.text))))
 
     def _notes(self, text: str, terms: list[str]) -> list[str]:
         """Per-request <context> line: the likely mishearings that actually occur in this

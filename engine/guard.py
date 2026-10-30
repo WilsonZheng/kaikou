@@ -22,9 +22,16 @@ _DROPPABLE = set("嗯呃啊哦呀吧呢嘛就然后反正那个这是的了") | 
 _STRONG_MARKERS = ("您", "考虑到", "**", "Note:", "以下是", "好的，")
 _WEAK_MARKERS = ("请", "是否", "建议", "注意：")
 
+# The speaker took something back ("周二，不对，周三", "Brooke 是男的，不是女的"): a good
+# edit then drops the retracted part, so coverage may fall further.
+CORRECTION = re.compile(r"不对|说错|我是说|我的意思是|重新说|重说|更正|纠正|搞错|弄错|记错|口误|"
+                        r"不是[^，,。？?]{1,12}[，,]\s*(?:而)?是|是[^，,。？?]{1,12}[，,]\s*不是|"
+                        r"\bactually\b|\bI mean\b|scratch that", re.I)
+
 MAX_NOVELTY = 0.35   # Typeless p97 0.23; answering/expanding outputs 0.55+
 MIN_COVERAGE = 0.70  # Typeless never below 0.80; rewrites 0.44-0.67
 MIN_SENTENCE = 0.50  # every long transcript sentence keeps at least half its tokens
+MIN_COVERAGE_CORRECTED = 0.55
 
 
 def normalize_numbers(text: str) -> str:
@@ -84,9 +91,10 @@ def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
             return "short answer"
     elif novelty(raw, out, allowed) > MAX_NOVELTY:
         return "novel content"
-    if len(tokens(raw)) >= 20 and coverage(raw, out) < MIN_COVERAGE:
+    corrected = bool(CORRECTION.search(raw))
+    if len(tokens(raw)) >= 20 and coverage(raw, out) < (MIN_COVERAGE_CORRECTED if corrected else MIN_COVERAGE):
         return "low coverage"
-    if dropped_sentence(raw, out):
+    if not corrected and dropped_sentence(raw, out):
         return "dropped sentence"
     if added_marker(raw, out):
         return "added marker"

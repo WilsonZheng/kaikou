@@ -182,6 +182,24 @@ its tokens never appear in the transcript or vocabulary. Calibrated on the eval 
 Typeless's own edits stay under 23% novel tokens (p97); outputs that answer instead of
 edit score 55% and up.
 
+A transcript where the speaker takes something back ("不对", "我是说", "是男的，不是女的",
+"actually") may lose more: coverage down to 55%, and no per-sentence check, since a good
+edit drops the retracted part. Before this, about one long dictation a day had a correct
+merge thrown away and the raw text inserted.
+
+Self-corrections and restatements (rule 5) are the rule the 8B post-editor ignores most.
+Restating it right after the transcript fixes many ("改到十点，就是说挪到十点吧" comes
+out once), but costs ~0.2 s of prefill on this M2 Pro, so it is added only when the
+transcript shows a correction phrase, a restating phrase ("就是说") or the same three
+content characters twice: about a quarter of requests.
+
+Tried and dropped (2026-10-30, replaying the user's long dictations):
+- Giving each chunk the text already edited before it, so lists and "他" carry on: it
+  cost 0.8 s more after release and the model sometimes copied the earlier chunk again.
+- A whole-text "revise" pass for corrections that point into an earlier chunk, with
+  the model listing "old => new" edits: it deleted "Brooke 是男的，不是女的" but left the
+  "她" it corrected, so the information was lost instead of applied.
+
 ## Privacy
 
 Audio and text stay on the machine. Personal data — the vocabulary (colleague names,
@@ -229,7 +247,11 @@ B→A) in favour of the more frequent, trims logs over 5 MB, and writes counts o
 
 ## Open risks
 
-- Long run-on dictations edited in chunks come out as one paragraph instead of a list.
+- Long run-on dictations edited in chunks come out as paragraphs, not as Typeless's
+  summarised bullet lists: each chunk is edited alone, and the 8B model rarely turns
+  parallel points into a list even when told to. Restructuring the whole text after
+  release would take ~25 s for a 5-minute dictation at ~40 tokens/s.
+- A correction that points into an earlier chunk ("哦对了，Brooke 是男的") stays as said.
 - Accessibility needs an administrator on this managed Mac. `scripts/kaikou-ensure` (run
   from Orca terminals by ~/.zshrc) starts Kaikou under Orca's existing Accessibility and
   Microphone grants; started any other way it runs in copy-to-clipboard mode on ⌃⌥Space.

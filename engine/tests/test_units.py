@@ -315,6 +315,51 @@ class FillerTest(unittest.TestCase):
         self.assertEqual(clean_fillers("一个一个处理，谢谢谢谢"), "一个一个处理，谢谢谢谢")
         self.assertEqual(clean_fillers("嗯"), "嗯")
         self.assertEqual(clean_fillers("那啥东西你放哪了"), "那啥东西你放哪了")
+        self.assertEqual(clean_fillers("就不了了之了，的的确确"), "就不了了之了，的的确确")
+
+
+class RestateTest(unittest.TestCase):
+    def test_reminder_only_when_it_looks_repeated_or_corrected(self):
+        from pipeline import may_restate
+        from prompts import REMINDER, user_message
+        self.assertTrue(may_restate("周二，不对，周三"))
+        self.assertTrue(may_restate("明天的会改到十点，就是说把明天那个会挪到十点吧"))
+        self.assertTrue(may_restate("Brooke 呢挺好的，哦还有 Brooke 是男的，不是女的"))
+        self.assertFalse(may_restate("帮我看一下这个 PR 为什么 CI 挂了"))
+        self.assertIn(REMINDER, user_message("x", remind=True))
+        self.assertNotIn(REMINDER, user_message("x"))
+
+    def test_guard_lets_a_correction_drop_what_was_taken_back(self):
+        raw = "你先去 demo environment 把 profile 的 consumer group 停掉，不对，我是说先去 nonprod 把 consumer 停掉"
+        out = "你先去 nonprod 把 consumer 停掉。"
+        self.assertTrue(accept_polished(raw, out))
+        self.assertFalse(accept_polished(raw.replace("不对，我是说", "以及记得"), out),
+                         "without a correction, that much dropped is a rewrite")
+
+
+class EchoTest(unittest.TestCase):
+    def test_request_header_never_reaches_the_text(self):
+        from pipeline import Pipeline
+        from polish import PolishResult
+        p = Pipeline.__new__(Pipeline)
+        p.lexicon, p.allowed = Lexicon(), set()
+
+        class Fake:
+            def polish(self, msg, source=None, should_stop=None, prompt="default"):
+                return PolishResult(text="当前应用：Orca  \n你看看能不能再优化一下。", prefill_s=0, gen_s=0, tokens=9)
+        p.polisher = Fake()
+        self.assertEqual(p.edit("你看看能不能再优化一下", "Orca"), "你看看能不能再优化一下。")
+
+
+class ListTest(unittest.TestCase):
+    def test_one_bullet_style_and_lists_kept_together(self):
+        from prompts import bullets
+        self.assertEqual(bullets("几点：\n• Blake 做事快\n• Sean 不看 Slack"), "几点：\n- Blake 做事快\n- Sean 不看 Slack")
+        self.assertEqual(join_chunks(["几个人：\n\n- Blake 做事快", "- Sean 不看 Slack\n\n就这些。"]),
+                         "几个人：\n\n- Blake 做事快\n- Sean 不看 Slack\n\n就这些。")
+
+    def test_quarters(self):
+        self.assertEqual(collapse_acronyms("跟 Brooke 的 Q 三目标，还有 Q四"), "跟 Brooke 的 Q3目标，还有 Q4")
 
 
 class SpacingTest(unittest.TestCase):
