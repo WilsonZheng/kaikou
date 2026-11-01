@@ -397,6 +397,15 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(check(raw, "你先把 PR 合并了，然后去 nonprod 验证一下部署有没有问题。"), "dropped sentence")
         self.assertIsNone(check(raw, raw))
 
+    def test_rejects_changed_person(self):
+        raw = "那你觉得我下次 G P 应该让 G P 给我做哪些检查？能给我总结一下？就根据我这个所有记录分析一下"
+        flipped = "你觉得下次 GP 应该让你做哪些检查？能给我总结一下吗？根据我这个所有记录分析一下。"
+        kept = "你觉得我下次 GP 应该让 GP 给我做哪些检查？能给我总结一下吗？根据我这个所有记录分析一下。"
+        self.assertEqual(check(raw, flipped), "changed person")
+        self.assertIsNone(check(raw, kept))
+        # Fixing 她 to 他 after "是男的，不是女的" is not a change of person.
+        self.assertIsNone(check("Brooke 说她明天来，Brooke 是男的，不是女的", "Brooke 说他明天来。"))
+
     def test_rejects_added_politeness(self):
         raw = "你看看选哪个比较好，我周三周四在家"
         self.assertEqual(check(raw, "您看看选哪个比较好？我周三、周四在家。"), "added marker")

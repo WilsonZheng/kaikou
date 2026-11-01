@@ -133,6 +133,11 @@ with ~17–27 GB of swap in use, so the engine budget is ~8 GB.
    M2 Pro), which caps the gain.
 5. **Wired weights** — `mx.set_wired_limit(9.5 GB)`; without it, swap pressure on this
    machine paged the model out between requests (prefill p50 2.6 s instead of 0.5 s).
+   After the Mac sleeps, macOS drops that residency and MLX does not ask again: from
+   2026-10-30 to 11-02 every keep-warm touch paged ~9 GB back in (3.5 s, every 45 s),
+   and a 20 s dictation waited 7.1 s. `MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS=5000`
+   (set in server.py before MLX loads) makes MLX re-request residency; the same
+   dictation then waited 3.3 s.
 
 Measured after key release, full pipeline, 102 of the user's recordings:
 
@@ -186,6 +191,11 @@ A transcript where the speaker takes something back ("不对", "我是说", "是
 "actually") may lose more: coverage down to 55%, and no per-sentence check, since a good
 edit drops the retracted part. Before this, about one long dictation a day had a correct
 merge thrown away and the raw text inserted.
+
+The edit must also keep who does what: the output's 我/你/他 must be the transcript's,
+in order, with some left out. "你觉得我下次应该让 GP 给我做哪些检查" once came out as
+"…应该让你做哪些检查"; across 143 real edits, that was the only bad one this check
+catches, plus one harmless one, which then gets the minimal edit.
 
 Self-corrections and restatements (rule 5) are the rule the 8B post-editor ignores most.
 Restating it right after the transcript fixes many ("改到十点，就是说挪到十点吧" comes

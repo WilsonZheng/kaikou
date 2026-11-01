@@ -28,6 +28,11 @@ CORRECTION = re.compile(r"不对|说错|我是说|我的意思是|重新说|重�
                         r"不是[^，,。？?]{1,12}[，,]\s*(?:而)?是|是[^，,。？?]{1,12}[，,]\s*不是|"
                         r"\bactually\b|\bI mean\b|scratch that", re.I)
 
+# Who does what: "你觉得我下次应该让 GP 给我做哪些检查" once came out as "...应该让你做哪些
+# 检查". An edit deletes words but keeps the speaker's 我/你/他 in order.
+_PERSON = re.compile(r"[我你您他她]")
+_PERSON_CLASS = {"我": "1", "你": "2", "您": "2", "他": "3", "她": "3"}
+
 MAX_NOVELTY = 0.35   # Typeless p97 0.23; answering/expanding outputs 0.55+
 MIN_COVERAGE = 0.70  # Typeless never below 0.80; rewrites 0.44-0.67
 MIN_SENTENCE = 0.50  # every long transcript sentence keeps at least half its tokens
@@ -75,6 +80,13 @@ def added_marker(raw: str, out: str) -> bool:
     return bool(new(_STRONG_MARKERS)) or len(new(_WEAK_MARKERS)) >= 2
 
 
+def changed_person(raw: str, out: str) -> bool:
+    """The output's pronouns are not the transcript's with some left out (one in 143
+    real edits besides the bad one trips this; it then gets the minimal edit)."""
+    said = iter([_PERSON_CLASS[c] for c in _PERSON.findall(raw)])
+    return not all(p in said for p in (_PERSON_CLASS[c] for c in _PERSON.findall(out)))
+
+
 def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
     """Returns the reason the edit is rejected, or None if it is acceptable."""
     if not out.strip():
@@ -98,6 +110,8 @@ def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
         return "dropped sentence"
     if added_marker(raw, out):
         return "added marker"
+    if changed_person(raw, out):
+        return "changed person"
     return None
 
 

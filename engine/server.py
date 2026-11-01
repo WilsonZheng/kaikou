@@ -31,6 +31,12 @@ import wave
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The weights are wired (_limit_memory), but after the Mac sleeps macOS drops that
+# residency and MLX never asks again: from then on every keep-warm touch paged ~9 GB
+# back in (3.5 s, every 45 s) and dictations waited for it. MLX re-requests residency
+# on this interval; on memory that is already resident it costs nothing. Read when MLX
+# first starts, so it must be set before the import.
+os.environ.setdefault("MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS", "5000")
 
 from config import load_config  # noqa: E402
 import agent_learning  # noqa: E402
