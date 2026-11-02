@@ -6,6 +6,7 @@ import difflib
 import logging
 import os
 import re
+import resource
 import time
 
 import mlx.core as mx
@@ -169,7 +170,7 @@ def clean_fillers(text: str) -> str:
 
 
 _CJK_THEN_LATIN = re.compile(r"([㐀-鿿])([A-Za-z0-9])")
-_LATIN_THEN_CJK = re.compile(r"([A-Za-z0-9])([㐀-鿿])")
+_LATIN_THEN_CJK = re.compile(r"([A-Za-z0-9]|(?<=[0-9])%)([㐀-鿿])")
 
 
 def space_mixed(text: str) -> str:
@@ -184,6 +185,53 @@ def collapse_acronyms(text: str) -> str:
     text = _SPACED.sub(lambda m: m.group(1).replace(" ", ""), text)
     text = re.sub(r"(?<![A-Za-z])Q\s?([一二三四])", lambda m: f"Q{'一二三四'.index(m.group(1)) + 1}", text)  # "Q 三" -> Q3
     return re.sub(r"\bCICD\b", "CI/CD", text)
+
+
+def _faults() -> int:
+    r = resource.getrusage(resource.RUSAGE_SELF)
+    return r.ru_majflt + r.ru_minflt
+
+
+_CN_NUM = "零〇一二两三四五六七八九十百千万"
+_CN_VAL = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_MUL = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+# A unit spoken in English after a Chinese number ("八十 KG", "一点二 G"); never a plain
+# Chinese measure word, so "三个" and "两点半" stay as said.
+_UNIT = r"(?:kg|mg|ml|gb|mb|tb|kb|ms|cm|mm|km|ghz|mhz|hz|qps|rps|tps|fps|vcpu|cpu|g|k|m)(?![A-Za-z])"
+_PERCENT = re.compile(rf"百分之([{_CN_NUM}]+(?:点[{_CN_NUM[:12]}]+)?)(?![几多来余点{_CN_NUM}])")
+_WITH_UNIT = re.compile(rf"(?<![{_CN_NUM}])([{_CN_NUM}]+(?:点[{_CN_NUM[:12]}]+)?)(\s?)({_UNIT})", re.I)
+
+
+def cn_number(s: str) -> str | None:
+    """八十五 -> 85, 一千二百 -> 1200, 一二三 -> 123, 一点二 -> 1.2; None if it is not a number."""
+    whole, _, frac = s.partition("点")
+    if not whole or any(c not in _CN_VAL for c in frac):
+        return None
+    if all(c in _CN_VAL for c in whole):
+        n = "".join(str(_CN_VAL[c]) for c in whole)
+    else:
+        total = section = digit = 0
+        for i, c in enumerate(whole):
+            if c in _CN_VAL:
+                digit = _CN_VAL[c]
+                if i == len(whole) - 1 and i and _CN_MUL.get(whole[i - 1], 0) >= 100:
+                    digit *= _CN_MUL[whole[i - 1]] // 10  # 一万二 is 12000, 两百五 is 250
+            elif c == "万":
+                total, section, digit = (total + section + digit) * 10000, 0, 0
+            else:
+                section += (digit or 1) * _CN_MUL[c]
+                digit = 0
+        n = str(total + section + digit)
+    return n + ("." + "".join(str(_CN_VAL[c]) for c in frac) if frac else "")
+
+
+def written_numbers(text: str) -> str:
+    """Percentages and quantities with a unit as digits: 百分之八十五 -> 85%, 八十 KG ->
+    80 KG. The post-editor is told to do this but mostly copies what was said."""
+    pct = lambda m: (n + "%") if m.group(1) != "百" and (n := cn_number(m.group(1))) else m.group(0)
+    text = _PERCENT.sub(pct, text)
+    unit = lambda m: (n + " " + m.group(3)) if (n := cn_number(m.group(1))) else m.group(0)
+    return _WITH_UNIT.sub(unit, text)
 
 
 def session_terms(session) -> list[str]:
@@ -272,14 +320,16 @@ class Pipeline:
         """Pages both models back in after idle time. Under memory pressure macOS evicts
         them, and the first dictation after an hour paid ~3 s for it; doing this when the
         key goes down hides that behind the user's speech."""
-        t = time.perf_counter()
+        t, faults = time.perf_counter(), _faults()
         self.asr.transcribe(np.zeros(8_000, dtype=np.float32))
+        asr_s = time.perf_counter() - t
         if self.polisher:
             probe = mx.array(self.polisher.tok.encode("你好", add_special_tokens=False))[None]
             mx.eval(self.polisher.model(probe, cache=self.polisher._fresh_cache()))
         took = time.perf_counter() - t
-        if took > 1:
-            log.info("models touched in %.2fs (they had been paged out)", took)
+        if took > 1:  # which model, and whether it was paging (faults) or something else
+            log.info("models touched in %.2fs (asr %.2fs, llm %.2fs, %d page faults)",
+                     took, asr_s, took - asr_s, _faults() - faults)
 
     # ---------- while recording ----------
 
@@ -307,7 +357,7 @@ class Pipeline:
         """Post-edits one piece of transcript, with the guard and the minimal-edit retry.
         `terms` are names likely in this dictation. Returns None if `should_stop`
         interrupted it."""
-        fixed = collapse_acronyms(self.lexicon.apply(raw))
+        fixed = written_numbers(collapse_acronyms(self.lexicon.apply(raw)))
         if not self.polisher or not fixed.strip():
             return fixed
         t = timings if timings is not None else {}

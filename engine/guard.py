@@ -83,8 +83,9 @@ def added_marker(raw: str, out: str) -> bool:
 def changed_person(raw: str, out: str) -> bool:
     """The output's pronouns are not the transcript's with some left out (one in 143
     real edits besides the bad one trips this; it then gets the minimal edit)."""
-    said = iter([_PERSON_CLASS[c] for c in _PERSON.findall(raw)])
-    return not all(p in said for p in (_PERSON_CLASS[c] for c in _PERSON.findall(out)))
+    people = lambda t: [_PERSON_CLASS[c] for c in _PERSON.findall(t.replace("其他", ""))]
+    said = iter(people(raw))
+    return not all(p in said for p in people(out))
 
 
 def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:

@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lexicon import Lexicon  # noqa: E402
 from guard import accept_polished, check, coverage, novelty  # noqa: E402
-from pipeline import clean_fillers, collapse_acronyms, context_terms, join_chunks, sanitize_context, split_complete  # noqa: E402
+from pipeline import (clean_fillers, collapse_acronyms, context_terms, join_chunks, sanitize_context,  # noqa: E402
+                      space_mixed, split_complete, written_numbers)
 from segmenter import SR, Segmenter, has_speech, join_texts, session_language  # noqa: E402
 
 
@@ -351,6 +352,17 @@ class EchoTest(unittest.TestCase):
         self.assertEqual(p.edit("你看看能不能再优化一下", "Orca"), "你看看能不能再优化一下。")
 
 
+class NumberTest(unittest.TestCase):
+    def test_percent_and_units_become_digits(self):
+        said = "CPU 用到百分之八十五的时候，内存大概一点二 G，我想减到八十KG左右，一万二 qps"
+        self.assertEqual(space_mixed(written_numbers(said)),
+                         "CPU 用到 85% 的时候，内存大概 1.2 G，我想减到 80 KG 左右，12000 qps")
+
+    def test_leaves_words_and_vague_numbers(self):
+        for said in ("百分之百确定", "百分之五十几", "三个 pod", "两点半开会", "快一点", "其他的方法"):
+            self.assertEqual(written_numbers(said), said)
+
+
 class ListTest(unittest.TestCase):
     def test_one_bullet_style_and_lists_kept_together(self):
         from prompts import bullets
@@ -405,6 +417,8 @@ class GuardTest(unittest.TestCase):
         self.assertIsNone(check(raw, kept))
         # Fixing 她 to 他 after "是男的，不是女的" is not a change of person.
         self.assertIsNone(check("Brooke 说她明天来，Brooke 是男的，不是女的", "Brooke 说他明天来。"))
+        # "其他" is not a person.
+        self.assertIsNone(check("你先用另外的方法试一下，如果都不行再跟我说", "你先用其他方法试一下，如果都不行再跟我说。"))
 
     def test_rejects_added_politeness(self):
         raw = "你看看选哪个比较好，我周三周四在家"
