@@ -140,7 +140,11 @@ with ~17–27 GB of swap in use, so the engine budget is ~8 GB.
    dictation then waited 3.3 s. Over the next 4.5 hours a slow touch (1-4 s) still came
    about every few minutes instead of every 45 s, with the weights wired and nothing
    of theirs in swap; ~200 MB of the Python heap was. The touch log now splits the time
-   between the two models and counts page faults, to tell which it is.
+   between the two models and counts page faults, to tell which it is. Answer
+   (2026-11-05): the recognizer, ~3.5 s with ~3,300 page faults (about 1 ms each),
+   while the post-editor takes 0.1 s; on silence the recognizer decodes only 3 tokens,
+   so it is CPU-side memory coming back from swap, not work. The key-down touch hides
+   it: dictations of 2-5 s waited 1.0-1.5 s after release.
 
 Measured after key release, full pipeline, 102 of the user's recordings:
 
@@ -201,15 +205,20 @@ in order, with some left out. "你觉得我下次应该让 GP 给我做哪些检
 catches, plus one harmless one, which then gets the minimal edit.
 
 Percentages and quantities with an English unit become digits before the post-edit
-(百分之八十五 -> 85%, 一点二 G -> 1.2 G, 八十KG -> 80 KG): the 8B post-editor was told to
-and mostly copied the words. Vague ones (百分之五十几) and Chinese measure words
+(百分之八十五 -> 85%, 一点二 G -> 1.2 G, 八十KG -> 80 KG), and so do numbers read out digit
+by digit (一八四五三 -> 18453): the 8B post-editor was told to and mostly copied the
+words, and once wrote 一八四五三 as 1853. The guard also rejects an output number of three
+or more digits that the transcript never said. Vague ones (百分之五十几) and Chinese measure words
 (三个, 两点半) stay as said.
 
 Self-corrections and restatements (rule 5) are the rule the 8B post-editor ignores most.
 Restating it right after the transcript fixes many ("改到十点，就是说挪到十点吧" comes
 out once), but costs ~0.2 s of prefill on this M2 Pro, so it is added only when the
 transcript shows a correction phrase, a restating phrase ("就是说") or the same three
-content characters twice: about a quarter of requests.
+content characters again within 12 characters ("部署完毕，部署完毕"): about one request in
+seven. Counting repeats anywhere fired on 39% of requests, mostly on topic words said
+twice ("生产环境", "你看看"), and there the reminder made the post-editor drop a whole
+first sentence it took for a false start.
 
 Tried and dropped (2026-10-30, replaying the user's long dictations):
 - Giving each chunk the text already edited before it, so lists and "他" carry on: it

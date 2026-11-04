@@ -15,7 +15,7 @@ import numpy as np
 from asr import Recognizer
 from context import ContextSource, is_name_like, sound_alike
 from slack import SlackSource
-from guard import CORRECTION, check, novelty, tokens
+from guard import _CN_NUM, CORRECTION, check, cn_number, novelty, tokens
 from lexicon import Lexicon, lexicon_mtime
 from polish import Polisher
 from prompts import build_system_prompt, bullets, user_message
@@ -43,23 +43,28 @@ _CLAUSE_END = re.compile(r"[，,；;]")
 _LIST_ITEM = re.compile(r"^(\d+)\.\s")
 _BULLET = re.compile(r"^\s*- ")
 _RESTATE = re.compile(r"就是说|换句话说|也就是说|我是想说|我想说的是|再说一遍|重新来")
-_FUNCTION_CHARS = set("的了是我你他她它这那就在有和也都还要会能把给去说一个们么什吧呢啊嘛")
+_FUNCTION_CHARS = set("的了是我你他她它这那就在有和也都还要会能把给去说一个们么什吧呢啊嘛看下觉得想样怎")
+# A restatement repeats itself right away ("部署完毕，部署完毕"); the same words far apart
+# are the topic ("生产环境" twice in one request), and the reminder there made the
+# post-editor drop a sentence it took for a first try.
+_RESTATE_GAP = 12
 
 
 def may_restate(text: str) -> bool:
     """Signs the speaker took something back or said it twice: a correction phrase, a
-    restating phrase, or the same three content characters twice. Only then does the
-    request carry the reminder (it costs ~0.2 s of prefill), about a quarter of them."""
+    restating phrase, or the same three content characters again within a few
+    characters. Only then does the request carry the reminder (it costs ~0.2 s of
+    prefill), about one in seven of them."""
     if CORRECTION.search(text) or _RESTATE.search(text):
         return True
-    seen = set()
+    first: dict[str, int] = {}
     for i in range(len(text) - 2):
         g = text[i:i + 3]
         if _CJK.fullmatch(g[0]) and _CJK.fullmatch(g[1]) and _CJK.fullmatch(g[2]) \
                 and sum(c in _FUNCTION_CHARS for c in g) <= 1:
-            if g in seen:
+            if g in first and i - first[g] <= _RESTATE_GAP:
                 return True
-            seen.add(g)
+            first.setdefault(g, i)
     return False
 
 
@@ -192,46 +197,25 @@ def _faults() -> int:
     return r.ru_majflt + r.ru_minflt
 
 
-_CN_NUM = "零〇一二两三四五六七八九十百千万"
-_CN_VAL = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-_CN_MUL = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 # A unit spoken in English after a Chinese number ("八十 KG", "一点二 G"); never a plain
 # Chinese measure word, so "三个" and "两点半" stay as said.
 _UNIT = r"(?:kg|mg|ml|gb|mb|tb|kb|ms|cm|mm|km|ghz|mhz|hz|qps|rps|tps|fps|vcpu|cpu|g|k|m)(?![A-Za-z])"
 _PERCENT = re.compile(rf"百分之([{_CN_NUM}]+(?:点[{_CN_NUM[:12]}]+)?)(?![几多来余点{_CN_NUM}])")
+# Three or more digits read one by one (PR, issue, phone numbers). Next to 十/百/点 or
+# another numeral it is part of something else ("一五一十", "三四五点").
+_DIGIT_RUN = re.compile(r"(?<![十百千万两点零〇一二三四五六七八九])(?!七七八八)[零〇一二三四五六七八九]{3,}(?![十百千万两点零〇一二三四五六七八九])")
 _WITH_UNIT = re.compile(rf"(?<![{_CN_NUM}])([{_CN_NUM}]+(?:点[{_CN_NUM[:12]}]+)?)(\s?)({_UNIT})", re.I)
 
 
-def cn_number(s: str) -> str | None:
-    """八十五 -> 85, 一千二百 -> 1200, 一二三 -> 123, 一点二 -> 1.2; None if it is not a number."""
-    whole, _, frac = s.partition("点")
-    if not whole or any(c not in _CN_VAL for c in frac):
-        return None
-    if all(c in _CN_VAL for c in whole):
-        n = "".join(str(_CN_VAL[c]) for c in whole)
-    else:
-        total = section = digit = 0
-        for i, c in enumerate(whole):
-            if c in _CN_VAL:
-                digit = _CN_VAL[c]
-                if i == len(whole) - 1 and i and _CN_MUL.get(whole[i - 1], 0) >= 100:
-                    digit *= _CN_MUL[whole[i - 1]] // 10  # 一万二 is 12000, 两百五 is 250
-            elif c == "万":
-                total, section, digit = (total + section + digit) * 10000, 0, 0
-            else:
-                section += (digit or 1) * _CN_MUL[c]
-                digit = 0
-        n = str(total + section + digit)
-    return n + ("." + "".join(str(_CN_VAL[c]) for c in frac) if frac else "")
-
-
 def written_numbers(text: str) -> str:
-    """Percentages and quantities with a unit as digits: 百分之八十五 -> 85%, 八十 KG ->
-    80 KG. The post-editor is told to do this but mostly copies what was said."""
+    """Percentages, quantities with a unit and read-out numbers as digits: 百分之八十五 ->
+    85%, 八十 KG -> 80 KG, 一八四五三 -> 18453. The post-editor is told to do this but
+    mostly copies what was said, and once wrote 一八四五三 as 1853."""
     pct = lambda m: (n + "%") if m.group(1) != "百" and (n := cn_number(m.group(1))) else m.group(0)
     text = _PERCENT.sub(pct, text)
     unit = lambda m: (n + " " + m.group(3)) if (n := cn_number(m.group(1))) else m.group(0)
-    return _WITH_UNIT.sub(unit, text)
+    text = _WITH_UNIT.sub(unit, text)
+    return _DIGIT_RUN.sub(lambda m: cn_number(m.group()), text)
 
 
 def session_terms(session) -> list[str]:

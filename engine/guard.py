@@ -39,6 +39,49 @@ MIN_SENTENCE = 0.50  # every long transcript sentence keeps at least half its to
 MIN_COVERAGE_CORRECTED = 0.55
 
 
+_CN_NUM = "零〇一二两三四五六七八九十百千万"
+_CN_VAL = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_MUL = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+
+
+def cn_number(s: str) -> str | None:
+    """八十五 -> 85, 一千二百 -> 1200, 一二三 -> 123, 一点二 -> 1.2; None if it is not a number."""
+    whole, _, frac = s.partition("点")
+    if not whole or any(c not in _CN_VAL for c in frac):
+        return None
+    if all(c in _CN_VAL for c in whole):
+        n = "".join(str(_CN_VAL[c]) for c in whole)
+    else:
+        total = section = digit = 0
+        for i, c in enumerate(whole):
+            if c in _CN_VAL:
+                digit = _CN_VAL[c]
+                if i == len(whole) - 1 and i and _CN_MUL.get(whole[i - 1], 0) >= 100:
+                    digit *= _CN_MUL[whole[i - 1]] // 10  # 一万二 is 12000, 两百五 is 250
+            elif c == "万":
+                total, section, digit = (total + section + digit) * 10000, 0, 0
+            else:
+                section += (digit or 1) * _CN_MUL[c]
+                digit = 0
+        n = str(total + section + digit)
+    return n + ("." + "".join(str(_CN_VAL[c]) for c in frac) if frac else "")
+
+
+def numbers(text: str) -> set[str]:
+    """Every number in the text, written as digits: 1509, 一五零九 and 一千五百零九 all count."""
+    found = set(re.findall(r"\d+", text))
+    for run in re.findall(f"[{_CN_NUM}]+", text):
+        if (n := cn_number(run)) is not None:
+            found.add(n)
+    return found
+
+
+def changed_number(raw: str, out: str) -> bool:
+    """A number of three or more digits that the transcript never said."""
+    said = numbers(raw)
+    return any(n not in said for n in re.findall(r"\d{3,}", out))
+
+
 def normalize_numbers(text: str) -> str:
     """一五零九 -> 1509, so spoken digits and written digits compare equal."""
     return _CN_RUN.sub(lambda m: "".join(_CN_DIGIT[c] for c in m.group()), text)
@@ -113,6 +156,8 @@ def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
         return "added marker"
     if changed_person(raw, out):
         return "changed person"
+    if changed_number(raw, out):
+        return "changed number"
     return None
 
 

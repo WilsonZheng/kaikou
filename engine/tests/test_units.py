@@ -327,6 +327,10 @@ class RestateTest(unittest.TestCase):
         self.assertTrue(may_restate("明天的会改到十点，就是说把明天那个会挪到十点吧"))
         self.assertTrue(may_restate("Brooke 呢挺好的，哦还有 Brooke 是男的，不是女的"))
         self.assertFalse(may_restate("帮我看一下这个 PR 为什么 CI 挂了"))
+        self.assertTrue(may_restate("等它部署完毕，部署完毕之后告诉我"))
+        # "你看看" twice, and a topic word far apart, are not saying it again.
+        self.assertFalse(may_restate("你看看我回答他对是什么意思？不需要给 Peter 发了，你看看具体要 Hoffman 做什么"))
+        self.assertFalse(may_restate("生产环境的数据都正常吗？如果正常的话，之后再把那些 monitor 恢复，再检查一遍生产环境"))
         self.assertIn(REMINDER, user_message("x", remind=True))
         self.assertNotIn(REMINDER, user_message("x"))
 
@@ -359,8 +363,19 @@ class NumberTest(unittest.TestCase):
                          "CPU 用到 85% 的时候，内存大概 1.2 G，我想减到 80 KG 左右，12000 qps")
 
     def test_leaves_words_and_vague_numbers(self):
-        for said in ("百分之百确定", "百分之五十几", "三个 pod", "两点半开会", "快一点", "其他的方法"):
+        for said in ("百分之百确定", "百分之五十几", "三个 pod", "两点半开会", "快一点", "其他的方法",
+                     "一五一十地说", "弄得七七八八了", "三点五十开会"):
             self.assertEqual(written_numbers(said), said)
+
+    def test_read_out_numbers_become_digits(self):
+        self.assertEqual(written_numbers("那个一八四五三这个 PR，还有六三六 number"), "那个18453这个 PR，还有636 number")
+
+    def test_guard_rejects_a_changed_number(self):
+        raw = "那个 appointment domain 那个18453这个 PR，你看看还有没有 code review 需要处理"
+        self.assertEqual(check(raw, "那个 appointment domain 的 1853 这个 PR，你看看还有没有 code review 需要处理？"),
+                         "changed number")
+        self.assertIsNone(check(raw, "appointment domain 的 18453 这个 PR，你看看还有没有 code review 需要处理？"))
+        self.assertIsNone(check("一千二百个 request 里面有一五零九个失败了吗", "1200 个 request 里面有 1509 个失败了吗？"))
 
 
 class ListTest(unittest.TestCase):
