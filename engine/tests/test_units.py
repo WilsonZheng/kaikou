@@ -424,6 +424,11 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(check(raw, "你先把 PR 合并了，然后去 nonprod 验证一下部署有没有问题。"), "dropped sentence")
         self.assertIsNone(check(raw, raw))
 
+    def test_rejects_a_dropped_limit(self):
+        self.assertEqual(check("就只回一跟二吧。", "就回一、二吧。"), "dropped limit")
+        self.assertIsNone(check("就只回一跟二吧。", "就只回一、二吧。"))
+        self.assertIsNone(check("只是这个 PR 还没过 CI，你看一下", "但这个 PR 还没过 CI，你看一下"))
+
     def test_rejects_changed_person(self):
         raw = "那你觉得我下次 G P 应该让 G P 给我做哪些检查？能给我总结一下？就根据我这个所有记录分析一下"
         flipped = "你觉得下次 GP 应该让你做哪些检查？能给我总结一下吗？根据我这个所有记录分析一下。"
@@ -459,6 +464,9 @@ class AgentLearningTest(unittest.TestCase):
         self.assertEqual(corrections(said, span), [("你有", "NEO"), ("Hoppen", "hoffman")])
         self.assertEqual(corrections(said, said), [])
         self.assertEqual(corrections("这个直接搞吧", "这个就快做了吧"), [], "rewording is not a fix")
+        said = "Put Ted Design，所有 outdated 地方都更新一下吧。"
+        span = sent_span(said, "更新 tech design 和 doc 对齐, 更新tech Design，所有 outdated 地方都更新一下吧。")
+        self.assertEqual(corrections(said, span), [("Put Ted", "更新tech")], "a space does not split one fix")
         self.assertIsNone(sent_span(said, "完全不同的一句话"), "a different message teaches nothing")
 
     def test_learns_once_per_dictation(self):

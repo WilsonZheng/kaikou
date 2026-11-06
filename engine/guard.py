@@ -131,6 +131,16 @@ def changed_person(raw: str, out: str) -> bool:
     return not all(p in said for p in people(out))
 
 
+_LIMIT = re.compile(r"只(?!是)|仅")
+
+
+def dropped_limit(raw: str, out: str) -> bool:
+    """A "只" or "仅" went missing ("就只回一跟二吧" edited to "就回一、二吧"), which widens
+    what the user asked for. "只是" (= but) may be reworded. Dropping "不" or "没" is left
+    alone: in real edits that is almost always a repeat being merged ("不知道，不知道")."""
+    return len(_LIMIT.findall(out)) < len(_LIMIT.findall(raw))
+
+
 def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
     """Returns the reason the edit is rejected, or None if it is acceptable."""
     if not out.strip():
@@ -158,6 +168,8 @@ def check(raw: str, out: str, allowed: set[str] = frozenset()) -> str | None:
         return "changed person"
     if changed_number(raw, out):
         return "changed number"
+    if not corrected and dropped_limit(raw, out):
+        return "dropped limit"
     return None
 
 

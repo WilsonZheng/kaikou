@@ -25,6 +25,12 @@ final class TokenDiffTests: XCTestCase {
         XCTAssertTrue(pairs.isEmpty, "\(pairs)")
     }
 
+    func testSpaceDoesNotSplitAFix() {
+        let pairs = TokenDiff.corrections(inserted: "Put Ted Design，所有 outdated 地方都更新一下吧",
+                                          edited: "更新 tech Design，所有 outdated 地方都更新一下吧")
+        XCTAssertEqual(pairs.map { "\($0.0)->\($0.1)" }, ["Put Ted->更新 tech"])
+    }
+
     func testCaseFix() {
         XCTAssertEqual(TokenDiff.corrections(inserted: "push 到 github", edited: "push 到 GitHub").map { $0.1 }, ["GitHub"])
     }

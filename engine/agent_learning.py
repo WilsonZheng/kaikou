@@ -62,8 +62,18 @@ def corrections(inserted: str, edited: str, max_tokens: int = 6) -> list[tuple[s
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
     if not any(map(_content, a)) or sum(m.size for m in sm.get_matching_blocks()) < 0.6 * len(a):
         return []
+    # A space left alone between two changed words does not split the fix ("Put Ted" to
+    # "更新tech" is one fix, not "Put" deleted and "Ted" replaced).
+    merged: list[list] = []
+    for op in sm.get_opcodes():
+        if op[0] != "equal" and len(merged) >= 2 and merged[-2][0] != "equal" and merged[-1][0] == "equal" \
+                and not "".join(a[merged[-1][1]:merged[-1][2]]).strip():
+            merged.pop()
+            merged[-1] = ["replace", merged[-1][1], op[2], merged[-1][3], op[4]]
+        else:
+            merged.append(list(op))
     pairs = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    for tag, i1, i2, j1, j2 in merged:
         if tag != "replace":
             continue
         d, n = [t for t in a[i1:i2] if _content(t)], [t for t in b[j1:j2] if _content(t)]

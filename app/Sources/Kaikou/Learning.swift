@@ -120,7 +120,13 @@ enum TokenDiff {
             pairs.append((from, to))
         }
         while i < a.count || j < b.count {
-            if i < a.count, j < b.count, a[i] == b[j] {
+            if i < a.count, j < b.count, a[i] == b[j], a[i].allSatisfy(\.isWhitespace), !(del.isEmpty && ins.isEmpty),
+               i + 1 < a.count, j + 1 < b.count, a[i + 1] != b[j + 1] {
+                // A space left alone between two changed words does not split the fix
+                // ("Put Ted" to "更新tech" is one fix, not "Put" deleted and "Ted" replaced).
+                del.append(a[i]); ins.append(b[j])
+                i += 1; j += 1
+            } else if i < a.count, j < b.count, a[i] == b[j] {
                 close(next: a[i])
                 prevEqual = a[i]
                 i += 1; j += 1

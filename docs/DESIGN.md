@@ -167,6 +167,10 @@ Beam search (4 beams) for the recognizer: on whole files it raised term recall
 76.2 → 78.3 but ran 2.5× slower, so it is used only for background segments, which
 are recognized while the user is still talking (background work stays at ~11% of real
 time, max 20%). End to end: MER 31.9 → 31.7, term recall 82.5 → 83.1, waiting unchanged.
+When the key is released while a segment is still in beam search, the best live
+hypothesis is finished greedily from its own cache instead of starting over, so the tokens
+already decoded are not decoded twice (on a 20 s segment stopped at token 40 of about 50,
+1.5 s instead of about 2.2 s).
 
 Tried and not adopted: giving the post-editor a second recognizer hypothesis (no
 hotwords) as `<alt>`. Over all clips it cut English WER 31.7 → 29.6 and raised term
@@ -203,6 +207,11 @@ The edit must also keep who does what: the output's 我/你/他 must be the tran
 in order, with some left out. "你觉得我下次应该让 GP 给我做哪些检查" once came out as
 "…应该让你做哪些检查"; across 143 real edits, that was the only bad one this check
 catches, plus one harmless one, which then gets the minimal edit.
+
+It must keep every 只 and 仅 too ("只是", meaning "but", may be reworded): "就只回一跟二吧"
+came out as "就回一、二吧", which asks for more than was said. It was the only such edit in
+353. Dropped 不 and 没 are not checked: in 28 of those 353 edits a 不 or 没 went missing,
+nearly always a repeat merged ("不知道，不知道", "没有还没有").
 
 Percentages and quantities with an English unit become digits before the post-edit
 (百分之八十五 -> 85%, 一点二 G -> 1.2 G, 八十KG -> 80 KG), and so do numbers read out digit
@@ -251,6 +260,9 @@ Code transcripts once an hour, in a background-priority child process, and compa
 terminal dictation with the message sent within 20 minutes of it. Only the corrected word
 pairs are kept (in `learned.json`, like the app's own learning). A pair whose source is a
 common English word or a Chinese word of one or two characters never becomes a rule.
+A space left alone between two changed words keeps them one fix: "Put Ted Design" sent as
+"更新tech Design" once taught "Ted" to "更新tech", because the diff saw "Put" deleted and
+"Ted" replaced (the app's own learning, `TokenDiff`, had the same flaw).
 `"agent_learning": false` turns it off.
 
 ## Hotkey

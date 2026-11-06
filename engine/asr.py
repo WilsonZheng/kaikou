@@ -98,7 +98,7 @@ class Recognizer:
         embeds = mx.concatenate([head_emb, audio_emb.astype(text_emb.dtype), text_emb], axis=0)
         beams = self.beams if beams is None else beams
         out = self._beam_search(embeds, n_audio, beams, should_stop) if beams > 1 else None
-        if out is None:  # greedy, or the beam search gave way to a key release
+        if out is None:
             out = self._greedy(embeds, n_audio)
         text = _LANG_TAG.sub("", self.tok.decode(out))
         if self._leak:
@@ -124,10 +124,13 @@ class Recognizer:
         cache = self._fresh_cache()
         hidden = m.model(inputs_embeds=embeds[None], cache=cache)[:, -1:, :]
         logits = m.lm_head(hidden) if m.lm_head is not None else m.model.embed_tokens.as_linear(hidden)
-        y = mx.argmax(logits[:, -1, :], axis=-1)
+        return self._decode(cache, mx.argmax(logits[:, -1, :], axis=-1), [], n_audio)
+
+    def _decode(self, cache, y, out: list[int], n_audio: int) -> list[int]:
+        """Greedy decoding from token `y`, which follows `out` and is not yet in `cache`."""
+        m = self.model
         mx.async_eval(y)
-        out: list[int] = []
-        for _ in range(64 + n_audio * 2):
+        for _ in range(64 + n_audio * 2 - len(out)):
             # Queue the next step before reading this token (GPU/Python overlap).
             nxt = mx.argmax(m._forward_with_embeds(m.model.embed_tokens(y[:, None]), cache)[:, -1, :], axis=-1)
             mx.async_eval(nxt)
@@ -163,7 +166,14 @@ class Recognizer:
         norm = lambda sc, n: sc / (((5 + n) / 6) ** 0.6)
         for _ in range(64 + n_audio * 2):
             if should_stop and should_stop():
-                return None  # the user is waiting: finish this segment greedily instead
+                # The user is waiting: finish the best live hypothesis greedily, keeping
+                # what is decoded so far (a restart would decode it all over again).
+                live = [i for i, s in enumerate(seqs) if s[-1] not in self.eos]
+                if live:
+                    i = live[0]  # seqs are sorted best first
+                    for c in cache:
+                        c.keys, c.values = c.keys[i:i + 1], c.values[i:i + 1]
+                    return self._decode(cache, mx.array([seqs[i][-1]]), seqs[i][:-1], n_audio)
             alive = [i for i, s in enumerate(seqs) if s[-1] not in self.eos]
             for i in range(len(seqs)):
                 if seqs[i][-1] in self.eos:
