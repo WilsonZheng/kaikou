@@ -111,6 +111,11 @@ class Server:
                 self.last_gpu = time.time()
                 with self.pending_lock:
                     self.pending -= 1
+                    idle = self.pending == 0 and not self.sessions
+                if idle:
+                    # Background jobs (warm-up, prompt rebuilds) leave up to the cache limit
+                    # of freed buffers behind; nobody is waiting, so give them back.
+                    _release_buffers()
         fut = self.gpu.submit(run)
         # A job cancelled before it starts never runs its finally.
         fut.add_done_callback(lambda f: f.cancelled() and self._dec())

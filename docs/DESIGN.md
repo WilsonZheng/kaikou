@@ -150,6 +150,12 @@ with ~17–27 GB of swap in use, so the engine budget is ~8 GB.
    while the post-editor takes 0.1 s; on silence the recognizer decodes only 3 tokens,
    so it is CPU-side memory coming back from swap, not work. The key-down touch hides
    it: dictations of 2-5 s waited 1.0-1.5 s after release.
+   Where the engine's 9.3 GB went (2026-11-10): weights 6.6 GB (recognizer 2.3,
+   post-editor 4.3), the post-editor's two cached system prompts 1.2 GB (5,400 and 2,800
+   tokens at 144 KB each), and up to 1 GB of freed buffers MLX keeps for reuse, which
+   only finishing a dictation gave back, so background jobs (warm-up touches, prompt
+   rebuilds) left them behind. The GPU thread now clears them whenever it runs out of
+   work with nobody talking: 8.4 GB, waiting unchanged.
 
 Measured after key release, full pipeline, 102 of the user's recordings:
 
