@@ -15,6 +15,7 @@ post-editor toward the right spelling and never go into the text by themselves.
 
 from __future__ import annotations
 
+import datetime as dt
 import difflib
 import glob
 import json
@@ -89,6 +90,20 @@ def new_names(text: str, known: set[str], min_count: int = 3) -> Counter:
 
 # ---------- sources ----------
 
+def unique_paths(patterns: list[str]) -> list[str]:
+    """Glob matches, each file once: ~/.claude-vetsoft3/projects can be a link to
+    ~/.claude/projects, and then every session matched twice and took two of the three
+    session slots."""
+    seen, out = set(), []
+    for pattern in patterns:
+        for p in glob.glob(pattern):
+            real = os.path.realpath(p)
+            if real not in seen:
+                seen.add(real)
+                out.append(real)
+    return out
+
+
 def _message_text(entry: dict) -> tuple[str, str]:
     """(conversation text, tool output) of one transcript line."""
     if entry.get("type") not in ("user", "assistant"):
@@ -129,6 +144,25 @@ def read_tail(path: str, max_bytes: int) -> list[dict]:
     return out
 
 
+def last_prompt(path: str, tail_bytes: int = 65_536) -> float:
+    """When the user last wrote in this session (0 if not in its tail). Tool results,
+    hook output and injected turns do not count."""
+    for entry in reversed(read_tail(path, tail_bytes)):
+        if entry.get("type") != "user" or entry.get("isMeta"):
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                continue
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        if isinstance(content, str) and content.strip() and not content.lstrip().startswith("<"):
+            try:
+                return dt.datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
 class ContextSource:
     """Collects the terms for one dictation. File reads are cached by mtime, so a
     dictation in the same session costs a stat() per file."""
@@ -147,23 +181,24 @@ class ContextSource:
         self.tail_bytes = tail_bytes
         self._agent_cache: dict[str, tuple[float, Counter]] = {}
         self._history_cache: dict[str, tuple[float, Counter]] = {}
+        self._prompt_cache: dict[str, tuple[float, float]] = {}
         self._listed: tuple[float, list[str]] = (0.0, [])
         self.slack = slack
         self._slack_cache: tuple[int, Counter] = (0, Counter())
 
     @staticmethod
-    def _cached(cache: dict, path: str, compute) -> Counter:
+    def _cached(cache: dict, path: str, compute, empty=Counter):
         try:
             mtime = os.path.getmtime(path)
         except OSError:
-            return Counter()
+            return empty()
         hit = cache.get(path)
         if hit and hit[0] == mtime:
             return hit[1]
         try:
             value = compute(path)
         except (OSError, ValueError):
-            value = Counter()
+            value = empty()
         cache[path] = (mtime, value)
         return value
 
@@ -184,21 +219,21 @@ class ContextSource:
         listed_at, paths = self._listed
         if now - listed_at > 300:
             paths = []
-            for pattern in self.agent_globs:
-                for p in glob.glob(pattern):
-                    try:
-                        if now - os.path.getmtime(p) <= 86400:
-                            paths.append(p)
-                    except OSError:
-                        continue
+            for p in unique_paths(self.agent_globs):
+                try:
+                    if now - os.path.getmtime(p) <= 86400:
+                        paths.append(p)
+                except OSError:
+                    continue
             self._listed = (now, paths)
             return paths
         fresh = []
         for pattern in self.agent_globs:
-            for d in glob.glob(os.path.dirname(pattern)):
+            for d in unique_paths([os.path.dirname(pattern)]):
                 try:
                     if os.path.getmtime(d) >= listed_at:
-                        fresh += [p for p in glob.glob(os.path.join(d, os.path.basename(pattern))) if p not in paths]
+                        fresh += [p for p in unique_paths([os.path.join(d, os.path.basename(pattern))])
+                                  if p not in paths and p not in fresh]
                 except OSError:
                     continue
         return paths + fresh
@@ -213,9 +248,14 @@ class ContextSource:
                 continue
             if now - m <= self.agent_minutes * 60:
                 files.append((m, p))
-        recent = [p for _, p in sorted(files, reverse=True)[:3]]  # parallel sessions: the latest few
+        # Parallel sessions: the few the user last wrote in. Automations and background
+        # agents keep writing too (17 sessions in half an hour), but not prompts.
+        prompted = lambda f: (self._cached(self._prompt_cache, f[1], last_prompt, float), f[0])
+        recent = [p for _, p in sorted(files, key=prompted, reverse=True)[:3]]
         for p in [p for p in self._agent_cache if p not in recent]:
             del self._agent_cache[p]
+        for p in [p for p in self._prompt_cache if p not in {p for _, p in files}]:
+            del self._prompt_cache[p]
         total: Counter = Counter()
         for p in recent:
             total += self._cached(self._agent_cache, p, self._agent_file)

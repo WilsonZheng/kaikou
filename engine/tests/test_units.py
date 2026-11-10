@@ -252,6 +252,28 @@ class ContextTest(unittest.TestCase):
         src2 = ContextSource(["Hoffman"], "", agent_globs=[os.path.join(d, "projects", "*", "*.jsonl")])
         self.assertEqual(src2.gather(""), [], "only sessions active in the last half hour")
 
+    def test_sessions_the_user_wrote_in_come_first(self):
+        from context import ContextSource
+        d = tempfile.mkdtemp()
+        now = time.time()
+        stamp = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - ago))
+        def session(name, prompt_ago, text):
+            os.makedirs(os.path.join(d, name))
+            lines = [{"type": "user", "timestamp": stamp(prompt_ago), "message": {"content": "look at this"}},
+                     {"type": "assistant", "message": {"content": [{"type": "text", "text": f"{text} {text} {text}"}]}},
+                     {"type": "user", "timestamp": stamp(1), "message": {"content": [
+                         {"type": "tool_result", "content": "ok"}]}}]
+            with open(os.path.join(d, name, "s.jsonl"), "w") as f:
+                f.write("\n".join(json.dumps(x) for x in lines))
+        session("talking", 60, "Akahu")
+        for k in range(4):  # automations keep writing, nobody prompts them
+            session(f"bot{k}", 1500, f"Botname{k}")
+            os.utime(os.path.join(d, f"bot{k}", "s.jsonl"), (now + 5, now + 5))
+        src = ContextSource([], "", agent_globs=[os.path.join(d, "*", "*.jsonl"), os.path.join(d, "*", "*.jsonl")])
+        terms = src.gather("")
+        self.assertIn("Akahu", terms)
+        self.assertEqual(len(src._candidates(now)), 5, "a file matched twice is one session")
+
     def test_terms_from_slack(self):
         from context import ContextSource
         from slack import digest

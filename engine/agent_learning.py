@@ -127,9 +127,12 @@ def _message_text(entry: dict) -> str:
 
 
 def sent_messages(globs: list[str], since: dt.datetime) -> list[tuple[dt.datetime, str]]:
-    out = []
+    out, seen = [], set()
     for pattern in globs:
         for p in glob.glob(pattern):
+            if os.path.realpath(p) in seen:
+                continue  # ~/.claude-vetsoft3/projects can be a link to ~/.claude/projects
+            seen.add(os.path.realpath(p))
             try:
                 if os.path.getmtime(p) < since.timestamp():
                     continue

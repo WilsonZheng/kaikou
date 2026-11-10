@@ -101,6 +101,11 @@ with ~17–27 GB of swap in use, so the engine budget is ~8 GB.
    recordings: "Hopon" came back as Hoffman, "咖啡" as Kafka, "Easy Vet 赛" as ezyVet
    site, with no change in latency. The read-back filter covers this list too (seen
    once: a recording ending in silence came back with the list appended).
+   Of those sessions, the three the user last wrote a prompt in are read. Ranking by
+   file time picked the wrong ones: 17 sessions were written to in half an hour, most
+   by automations (PR review bots, scheduled agents) that nobody prompts, and
+   ~/.claude-vetsoft3/projects is a link to ~/.claude/projects, so each session matched
+   twice. "阿卡湖" came out for Akahu while the session about Akahu was open.
 6. **Targeted hints for the post-editor** — only for words actually in the transcript:
    known mishearings from the lexicon, learned fixes, and Latin words that are neither
    English (system dictionary) nor vocabulary but sound like a name in play
